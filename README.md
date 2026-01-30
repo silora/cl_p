@@ -1,8 +1,10 @@
 
 <div style="font-family: monospace;">
 <div align="center">
-  
-# <img src="demonstrations/icon.png" alt="Icon" width="40" height="40"> `cl_p`
+
+<img src="demonstrations/icon.png" alt="Icon" width="60" height="60">
+
+# `cl_p`
 <p style="color: grey; margin: 2px 0 0;">Clipboard Manager w/ Enhancements</p>
 
 </div>
