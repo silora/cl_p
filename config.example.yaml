@@ -6,7 +6,7 @@
       small: "gpt-4o-mini"
       medium: "gpt-4o"
       large: "gpt-4o"
-    timeout: 120
+    timeout: 400
   drawioExe: "C:\\Program Files\\draw.io\\draw.io.exe"
 
 ui:

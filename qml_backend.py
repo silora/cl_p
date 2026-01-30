@@ -187,6 +187,7 @@ class ClipListModel(QAbstractListModel):
     RenderModeRole = Qt.UserRole + 21
     PluginIdRole = Qt.UserRole + 22
     ExtraActionsRole = Qt.UserRole + 23
+    LastUsedRole = Qt.UserRole + 24
 
     def __init__(self, clips: Optional[list[ClipItem]] = None, parent=None) -> None:
         super().__init__(parent)
@@ -224,6 +225,10 @@ class ClipListModel(QAbstractListModel):
             return clip.content_text if clip.has_full_content else clip.preview_text
         if role == self.CreatedRole:
             return int(clip.created_at) * 1000  # QML expects ms
+        if role == self.LastUsedRole:
+            return (
+                int(clip.last_used_at) * 1000 if clip.last_used_at is not None else None
+            )
         if role == self.PinnedRole:
             return bool(clip.pinned)
         if role == self.GroupRole:
@@ -287,6 +292,7 @@ class ClipListModel(QAbstractListModel):
             self.RenderModeRole: b"renderMode",
             self.PluginIdRole: b"pluginId",
             self.ExtraActionsRole: b"extraActions",
+            self.LastUsedRole: b"lastUsedAt",
         }
 
     def set_clips(
@@ -844,7 +850,7 @@ class Backend(QObject):
         self._clipboard.setText(content)
         self._last_clip_text = content
         try:
-            self.storage.refresh_item_timestamp(int(item_id))
+            self.storage.touch_item_last_used(int(item_id))
         except Exception:
             pass
         if paste:
@@ -916,6 +922,7 @@ class Backend(QObject):
         image_blob: Optional[bytes] = None
         if clip.content_type == "image":
             image_blob = clip.content_blob
+            text_payload = None
         self._op_worker = OperationWorker(
             int(item_id), task, text=text_payload, image=image_blob
         )
@@ -1050,7 +1057,7 @@ class Backend(QObject):
         self._last_clip_text = text
         try:
             if getattr(clip, "id", None) is not None:
-                self.storage.refresh_item_timestamp(int(clip.id))
+                self.storage.touch_item_last_used(int(clip.id))
         except Exception:
             pass
         QTimer.singleShot(0, self._paste_to_foreground)
@@ -1076,7 +1083,7 @@ class Backend(QObject):
         self._last_clip_text = html
         try:
             if getattr(clip, "id", None) is not None:
-                self.storage.refresh_item_timestamp(int(clip.id))
+                self.storage.touch_item_last_used(int(clip.id))
         except Exception:
             pass
         QTimer.singleShot(0, self._paste_to_foreground)
@@ -1128,7 +1135,7 @@ class Backend(QObject):
         self._last_clip_text = text
         try:
             if getattr(clip, "id", None) is not None:
-                self.storage.refresh_item_timestamp(int(clip.id))
+                self.storage.touch_item_last_used(int(clip.id))
         except Exception:
             pass
         QTimer.singleShot(0, self._paste_to_foreground)
@@ -2050,6 +2057,19 @@ class Backend(QObject):
 
     def _push_to_clipboard(self, clip: ClipItem) -> None:
         content_type = clip.content_type or "text"
+        touched = False
+        try:
+            cid = int(getattr(clip, "id", -1))
+            if cid > 0:
+                self.storage.touch_item_last_used(cid)
+                # ensure selection stays on this item after resort
+                self._pending_focus_id = cid
+                touched = True
+        except Exception:
+            pass
+        if touched:
+            # Re-sort list so the used item jumps to the front for the current view.
+            self.refresh_items()
         self._ignore_next_clip = True
         if content_type == "image" and clip.content_blob:
             image = QImage.fromData(clip.content_blob)
@@ -2097,11 +2117,6 @@ class Backend(QObject):
         text = str(clip.content_text or "")
         self._clipboard.setText(text)
         self._last_clip_text = text
-        try:
-            if getattr(clip, "id", None) is not None:
-                self.storage.refresh_item_timestamp(int(clip.id))
-        except Exception:
-            pass
 
     def _paste_to_foreground(self) -> None:
         if not keyboard:

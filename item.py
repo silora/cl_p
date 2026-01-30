@@ -15,6 +15,7 @@ class ClipItem:
     pinned: bool
     pinned_at: Optional[int]
     group_id: int
+    last_used_at: Optional[int] = None
     preview_text: str = ""
     preview_blob: Optional[bytes] = None
     has_full_content: bool = True
@@ -104,6 +105,7 @@ def item_from_row(row) -> ClipItem:
         "pinned": bool(row["pinned"]),
         "pinned_at": int(row["pinned_at"]) if row["pinned_at"] is not None else None,
         "group_id": int(row["group_id"]),
+        "last_used_at": int(row["last_used_at"]) if row["last_used_at"] is not None else None,
         "preview_text": preview_text,
         "preview_blob": row["preview_blob"] if "preview_blob" in row.keys() else None,
         "has_full_content": has_full,

@@ -17,8 +17,8 @@ from ui.super_rich_text_item import SuperRichTextItem
 # Avoid non-integral scale factors that WebEngine rejects; override any env drift.
 os.environ["QT_SCALE_FACTOR"] = "1.0"
 
-APP_NAME = "ClipX"
-DB_NAME = "clipx.sqlite3"
+APP_NAME = "cl_p"
+DB_NAME = "cl_p.sqlite3"
 # ICON_NAME = "icon_white.svg"
 ICON_NAME = "icon_full.png"
 
@@ -70,13 +70,17 @@ def main() -> int:
     app.setFont(QFont(font_family, font_size))
 
     max_items = (
-        app_config.get("storage", {}).get("maxItemsPerGroup") if isinstance(app_config, dict) else None
+        app_config.get("storage", {}).get("maxItemsPerGroup")
+        if isinstance(app_config, dict)
+        else None
     )
-    storage = Storage(db_path, max_items_per_group=int(max_items) if max_items else None)
+    storage = Storage(
+        db_path, max_items_per_group=int(max_items) if max_items else None
+    )
     backend = Backend(storage)
     app.aboutToQuit.connect(storage.close)
 
-    qmlRegisterType(SuperRichTextItem, "ClipX", 1, 0, "SuperRichText")
+    qmlRegisterType(SuperRichTextItem, "cl_p", 1, 0, "SuperRichText")
 
     engine = QQmlApplicationEngine()
     engine.rootContext().setContextProperty("backend", backend)

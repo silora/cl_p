@@ -254,7 +254,7 @@ HTML_TEMPLATE = """<!doctype html>
       resize();
     })();
 
-    window.clipxPayload = function() {
+    window.cl_pPayload = function() {
       const hex = (document.getElementById('hex')?.textContent || '').trim().toUpperCase();
       return {
         hex: hex,

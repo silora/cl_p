@@ -5,7 +5,7 @@ import QtQuick.Window
 import QtQuick.Dialogs
 import QtQuick.Shapes
 import QtWebEngine
-import ClipX
+import cl_p
 
 ApplicationWindow {
     id: window
@@ -15,7 +15,7 @@ ApplicationWindow {
     height: appConfig.ui && appConfig.ui.window && appConfig.ui.window.height ? appConfig.ui.window.height : 860
     visible: false
     color: "transparent"
-    title: qsTr("ClipX")
+    title: qsTr("cl_p")
     onActiveChanged: if (!active && visible) backend.hideWindow()
     onVisibleChanged: if (visible) Qt.callLater(function() { window.raise(); window.requestActivate(); focusCatcher.forceActiveFocus(); })
 
@@ -705,6 +705,7 @@ ApplicationWindow {
                     anchors.fill: parent
                     anchors.margins: 8
                     property bool dragLocked: false
+                    property var rootWindow: window
                     interactive: !dragLocked
                     model: clipModel
                     spacing: 12
@@ -753,6 +754,8 @@ ApplicationWindow {
                         property bool isCurrent: delegateRoot.ListView.isCurrentItem
                         property bool isPinned: model.pinned
                         property bool isHovered: pressArea.containsMouse || openBadge.hovered || actionHover.hovered
+                        // Provide access to the parent ListView inside the delegate scope
+                        readonly property var clipList: ListView.view
 
                         property string clipContentType: model.contentType
                         property bool isImageContent: clipContentType === "image" || clipContentType === "svg+xml" || clipContentType === "drawio"
@@ -1229,7 +1232,7 @@ ApplicationWindow {
                                                     return
                                                 }
                                                 clipList.currentIndex = index
-                                                window.selectedClipId = delegateRoot.clipId
+                                                clipList.rootWindow.selectedClipId = delegateRoot.clipId
                                             }
                                             onDoubleClicked: function(mouse) {
                                                 if (delegateRoot.isPluginItem && delegateRoot.clipRenderMode === "web") {
@@ -1237,7 +1240,7 @@ ApplicationWindow {
                                                     return
                                                 }
                                                 clipList.currentIndex = index
-                                                window.selectedClipId = delegateRoot.clipId
+                                                clipList.rootWindow.selectedClipId = delegateRoot.clipId
                                                 var t = delegateRoot.clipContentText || ""
                                                 // var isUrl = /^\s*(https?:\/\/|www\.)/i.test(t)
                                                 // if (isUrl) {
@@ -1245,11 +1248,11 @@ ApplicationWindow {
                                                 //     return
                                                 // }
                                                 backend.activateItem(delegateRoot.clipId, true)
-                                                window.visible = false
+                                                clipList.rootWindow.visible = false
                                             }
                                             onPressAndHold: {
                                                 clipList.currentIndex = index
-                                                window.selectedClipId = delegateRoot.clipId
+                                                clipList.rootWindow.selectedClipId = delegateRoot.clipId
                                                 var canExpand = delegateRoot.isImageContent || delegateRoot.richIsLong
                                                 if (!canExpand) return
                                                 delegateRoot.longPressActive = true
@@ -1394,7 +1397,7 @@ ApplicationWindow {
                                                         if (!t) return
                                                         if (tag === "file") {
                                                             backend.openFilePath(t)
-                                                            window.visible = false
+                                                            clipList.rootWindow.visible = false
                                                             return
                                                         }
                                                         var isUrl = /^\s*(https?:\/\/|www\.)/i.test(t)
@@ -1403,7 +1406,7 @@ ApplicationWindow {
                                                             return
                                                         }
                                                         backend.activateSubitem(delegateRoot.clipId, t, true)
-                                                        window.visible = false
+                                                        clipList.rootWindow.visible = false
                                                     }
                                                     onPressAndHold: function(mouse) {
                                                         var t2 = modelData && modelData.text ? String(modelData.text) : ""
@@ -1507,7 +1510,7 @@ ApplicationWindow {
                                                 if (delegateRoot.isPluginItem && delegateRoot.clipRenderMode === "web") {
                                                     var view = pluginViewLoader ? pluginViewLoader.item : null
                                                     if (view && typeof view.runJavaScript === "function") {
-                                                        view.runJavaScript("(window.clipxPayload && window.clipxPayload()) || null", function(res) {
+                                                        view.runJavaScript("(window.cl_pPayload && window.cl_pPayload()) || null", function(res) {
                                                             backend.pluginActionWithPayload(delegateRoot.clipPluginId, row.id, res)
                                                         })
                                                     } else {

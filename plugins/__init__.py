@@ -1,2 +1,1 @@
-"""Plugin package for ClipX."""
-
+"""Plugin package for cl_p."""

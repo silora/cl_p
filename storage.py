@@ -40,6 +40,7 @@ class Storage:
                 preview_text TEXT,
                 preview_blob BLOB,
                 created_at INTEGER NOT NULL,
+                last_used_at INTEGER,
                 pinned INTEGER NOT NULL DEFAULT 0,
                 pinned_at INTEGER,
                 group_id INTEGER NOT NULL,
@@ -83,6 +84,8 @@ class Storage:
             cur.execute("ALTER TABLE items ADD COLUMN preview_text TEXT")
         if "preview_blob" not in cols:
             cur.execute("ALTER TABLE items ADD COLUMN preview_blob BLOB")
+        if "last_used_at" not in cols:
+            cur.execute("ALTER TABLE items ADD COLUMN last_used_at INTEGER")
         if "pinned_at" not in cols:
             cur.execute("ALTER TABLE items ADD COLUMN pinned_at INTEGER")
         # Backfill legacy content into content_text.
@@ -97,6 +100,12 @@ class Storage:
         cur.execute("DROP INDEX IF EXISTS idx_items_pinned_time")
         cur.execute(
             "CREATE INDEX IF NOT EXISTS idx_items_pinned_time ON items(pinned, pinned_at, created_at)"
+        )
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_items_last_used
+            ON items(last_used_at, created_at)
+            """
         )
         self.conn.commit()
 
@@ -289,6 +298,7 @@ class Storage:
                    preview_text,
                    preview_blob,
                    {length_expr} AS content_length,
+                   last_used_at,
                    created_at,
                    pinned,
                    pinned_at,
@@ -315,7 +325,7 @@ class Storage:
                 pinned DESC,
                 CASE WHEN pinned=1 THEN COALESCE(pinned_at, created_at) END ASC,
                 CASE WHEN pinned=1 THEN id END ASC,
-                CASE WHEN pinned=0 THEN created_at END DESC,
+                CASE WHEN pinned=0 THEN COALESCE(last_used_at, created_at) END DESC,
                 CASE WHEN pinned=0 THEN id END DESC
         """
         if group_id is not None and query:
@@ -352,10 +362,14 @@ class Storage:
             self._prune_group_items(group_id, self.max_items_per_group)
 
     def refresh_item_timestamp(self, item_id: int, ts: Optional[int] = None) -> None:
+        """Deprecated: kept for compatibility; updates last_used_at instead of created_at."""
+        self.touch_item_last_used(item_id, ts)
+
+    def touch_item_last_used(self, item_id: int, ts: Optional[int] = None) -> None:
         with self._lock:
             cur = self.conn.cursor()
             cur.execute(
-                "UPDATE items SET created_at=? WHERE id=?",
+                "UPDATE items SET last_used_at=? WHERE id=?",
                 (int(ts if ts is not None else time.time()), item_id),
             )
             self.conn.commit()
@@ -374,7 +388,7 @@ class Storage:
             SELECT id, content, content_type, content_text, content_blob,
                    preview_text, preview_blob,
                    COALESCE(LENGTH(content_text), 0) AS content_length,
-                   created_at, pinned, pinned_at, group_id,
+                   created_at, last_used_at, pinned, pinned_at, group_id,
                    1 AS has_full_content
             FROM items
             WHERE id=?
@@ -448,7 +462,7 @@ class Storage:
             SELECT id
             FROM items
             WHERE group_id=? AND pinned=0
-            ORDER BY created_at DESC, id DESC
+            ORDER BY COALESCE(last_used_at, created_at) DESC, id DESC
             """,
             (group_id,),
         )
@@ -486,11 +500,11 @@ class Storage:
             SELECT id, content, content_type, content_text, content_blob,
                    preview_text, preview_blob,
                    COALESCE(LENGTH(content_text), 0) AS content_length,
-                   created_at, pinned, pinned_at, group_id,
+                   created_at, last_used_at, pinned, pinned_at, group_id,
                    1 AS has_full_content
             FROM items
             WHERE group_id=?
-            ORDER BY created_at DESC
+            ORDER BY COALESCE(last_used_at, created_at) DESC
             LIMIT 1
             """,
             (group_id,),
