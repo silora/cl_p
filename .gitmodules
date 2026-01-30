@@ -1,0 +1,3 @@
+[submodule "vendors/mdict-query"]
+	path = vendors/mdict-query
+	url = https://github.com/mmjang/mdict-query

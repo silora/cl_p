@@ -1,0 +1,31 @@
+﻿external_dependencies:
+  llm_api:
+    base_url: "https://api.openai.com/v1"
+    api_key: "YOUR_API_KEY_HERE"
+    models:
+      small: "gpt-4o-mini"
+      medium: "gpt-4o"
+      large: "gpt-4o"
+    timeout: 120
+  drawioExe: "C:\\Program Files\\draw.io\\draw.io.exe"
+
+ui:
+  fontFamily: "Cascadia Code"
+  window:
+    width: 620
+    height: 860
+  palette:
+    grays: ["#212529", "#343a40", "#495057", "#6c757d", "#adb5bd", "#ced4da", "#dee2e6", "#e9ecef", "#f8f9fa"]
+    lightColors: ["#F94144", "#F9C74F", "#90BE6D", "#54a4ea", "#D1A2E6", "#F3722C", "#43AA8B", "#277DA1", "#F8961E", "#F9844A", "#4D908E"]
+    darkColors: ["#C73335", "#C9A23F", "#739957", "#427eaf", "#9a78a9", "#C15A22", "#35876F", "#1F6481", "#C77618", "#C66A3C", "#3D7371"]
+    highlightColors: ["#ff6565", "#ededed", "#68a8fc"]
+
+storage:
+  maxItemsPerGroup: 300
+
+plugins:
+  dictionary:
+    # Path to your .mdx dictionary file
+    mdxPath: "D:\\Dictionaries\\OALD9\\oald9.mdx"
+    # Optional: custom stylesheet for dictionary HTML
+    cssPath: "D:\\Dictionaries\\OALD9\\oald9.css"

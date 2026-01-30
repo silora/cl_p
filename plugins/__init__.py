@@ -1,0 +1,2 @@
+"""Plugin package for ClipX."""
+
