@@ -14,7 +14,7 @@
 ## <p style="font-family: monospace;">Features</p>
 
 <div align="center">
-  <img src="demonstrations/main.png" alt="Main UI" width="560">
+  <img src="demonstrations/main.png" alt="Main UI" width="300">
 </div>
 
 - **Capture everything**: text, images, rich text, and Draw.io diagrams stay faithful to the source.
