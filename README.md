@@ -78,4 +78,9 @@
 - **Easily extendable**: create custom plugins to add new features or integrations.
 - **Default plugins**: examples include dictionary lookup, color picker and current time insertion.
 
+---
 
+## Notes
+- Built with Python.
+- Heavy vibe coding with Codex, optimized performance not guaranteed.
+- Tested on Windows 11.
