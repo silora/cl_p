@@ -8,6 +8,7 @@ from .base import Plugin
 class DateTimePlugin(Plugin):
     plugin_id = "datetime"
     display_name = "Date & Time"
+    uses_clipboard = False
 
     def __init__(self, group_id: int) -> None:
         super().__init__(group_id)

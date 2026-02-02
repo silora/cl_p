@@ -212,6 +212,21 @@ class DictionaryPlugin(Plugin):
 
         return items[:1]
 
+    def on_clipboard_changed(self, clipboard_text: str) -> None:
+        raw = (clipboard_text or "").strip()
+        if not raw:
+            return
+        # Reset queue to latest clipboard content to avoid stale “Queued” items.
+        try:
+            if self._worker and self._worker.isRunning():
+                self._worker.requestInterruption()
+        except Exception:
+            pass
+        self._pending_queue = []
+        self._loading_word = None
+        self._enqueue_missing(self._extract_lookup_words(raw))
+        self._start_next_pending()
+
     def teardown(self) -> None:
         worker = self._worker
         if worker and worker.isRunning():
@@ -270,7 +285,7 @@ class DictionaryPlugin(Plugin):
         return ClipItem(
             id=-1000,
             content_type="html",
-            content_text="",
+            content_text=plain,
             content_blob=html_body.encode("utf-8"),
             created_at=int(time.time()),
             pinned=False,

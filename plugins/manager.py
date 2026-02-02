@@ -14,13 +14,38 @@ class PluginManager:
         self._plugins: list[Plugin] = []
 
     def register(self, plugin: Plugin) -> None:
+        base = -1000 - (len(self._plugins) * 100)
+        setattr(plugin, "_id_base", base)
         self._plugins.append(plugin)
 
+    def on_clipboard_changed(self, clipboard_text: str) -> None:
+        for plugin in self._plugins:
+            try:
+                plugin.on_clipboard_changed(clipboard_text)
+            except Exception:
+                continue
+
+    @property
+    def plugins(self) -> list[Plugin]:
+        return list(self._plugins)
+
     def build_items(self) -> List[ClipItem]:
-        clipboard_text = self._clipboard_text_provider() or ""
+        clipboard_text_cache = None
         items: list[ClipItem] = []
         for plugin in self._plugins:
-            items.extend(plugin.build_items(clipboard_text))
+            clip_txt = ""
+            if getattr(plugin, "uses_clipboard", True):
+                if clipboard_text_cache is None:
+                    clipboard_text_cache = self._clipboard_text_provider() or ""
+                clip_txt = clipboard_text_cache
+            plugin_items = plugin.build_items(clip_txt)
+            base = getattr(plugin, "_id_base", -1000)
+            for idx, item in enumerate(plugin_items):
+                try:
+                    item.id = int(base - idx)
+                except Exception:
+                    pass
+            items.extend(plugin_items)
         return items
 
     def dispatch_action(self, plugin_id: str, action_id: str, backend, payload=None) -> bool:

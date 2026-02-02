@@ -9,6 +9,8 @@ class Plugin(ABC):
 
     plugin_id: str
     display_name: str
+    # Whether build_items relies on current clipboard text.
+    uses_clipboard: bool = True
 
     def __init__(self, group_id: int) -> None:
         self.group_id = group_id
@@ -25,4 +27,8 @@ class Plugin(ABC):
     def teardown(self) -> None:
         """Optional cleanup hook."""
         # Default no-op so subclasses can opt-in.
+        return
+
+    def on_clipboard_changed(self, clipboard_text: str) -> None:
+        """Optional hook fired when the clipboard text changes."""
         return

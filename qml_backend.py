@@ -1,4 +1,4 @@
-import atexit
+﻿import atexit
 import base64
 import json
 import os
@@ -33,6 +33,7 @@ from PySide6.QtGui import QColor, QCursor, QFont, QGuiApplication, QImage, QPain
 
 from item import ClipItem, item_from_row
 from operations.llm import run_task
+from plugins.chatgpt import ChatGPTPlugin
 from plugins.colorpicker import ColorPickerPlugin
 from plugins.datetime import DateTimePlugin
 from plugins.dictionary import DictionaryPlugin
@@ -334,10 +335,12 @@ class ClipListModel(QAbstractListModel):
 
     def update_clip(self, clip: ClipItem) -> None:
         cid = int(getattr(clip, "id", -1))
-        if cid < 0:
+        if cid == -1:
+            print("invalid clip id, cannot update", cid)
             return
         row = self._row_by_id.get(cid)
         if row is None:
+            print("clip id not found in model, cannot update")
             return
         existing = self._clips[row]
         if not getattr(clip, "preview_text", None):
@@ -511,6 +514,7 @@ class Backend(QObject):
         self.storage = storage
         self.group_model = GroupListModel()
         self.clip_model = ClipListModel()
+        self.plugin_clip_model = ClipListModel()
         self._current_group_id: Optional[int] = None
         self._search_text: str = ""
         self._search_regex: bool = False
@@ -540,6 +544,7 @@ class Backend(QObject):
         atexit.register(self._preview_executor.shutdown, wait=False)
         self._drawio_preview_jobs: set[int] = set()
         self._drawio_preview_lock = threading.Lock()
+        self._plugin_initialized: bool = False
         self._plugin_base_colors: dict[str, str] = {}
         self.plugin_manager = PluginManager(
             group_id=PLUGIN_GROUP_ID,
@@ -559,6 +564,12 @@ class Backend(QObject):
             )
         )
         self.plugin_manager.register(DateTimePlugin(group_id=PLUGIN_GROUP_ID))
+        self.plugin_manager.register(
+            ChatGPTPlugin(
+                group_id=PLUGIN_GROUP_ID,
+                refresh_callback=self._refresh_plugins,
+            )
+        )
         # self.plugin_manager.register(
         #     TrexPlugin(
         #         group_id=PLUGIN_GROUP_ID,
@@ -593,6 +604,10 @@ class Backend(QObject):
     @Property(int, constant=True)
     def pluginsGroupId(self) -> int:
         return int(PLUGIN_GROUP_ID)
+
+    @Property(QObject, constant=True)
+    def pluginClipModel(self) -> QObject:
+        return self.plugin_clip_model
 
     @Slot(QObject)
     def setWindow(self, window: QObject) -> None:
@@ -644,10 +659,102 @@ class Backend(QObject):
             txt = self._last_clip_text or ""
         return txt.strip()
 
-    def _refresh_plugins(self) -> None:
-        """Ask the UI to rebuild plugin rows if Plugins group is visible."""
+    def refresh_plugin_items(
+        self, full: bool = False, clipboard_only: bool = False
+    ) -> tuple[list[ClipItem], dict[int, str]]:
+        """
+        Build/refresh plugin-rendered items.
+        - full=True: rebuild everything (resets model).
+        - clipboard_only=True: refresh only plugins that depend on clipboard text.
+        """
+        print(
+            "refreshing for",
+            "full" if full else "incremental",
+            "clipboard only" if clipboard_only else "all plugins",
+        )
+
+        def _build_all() -> tuple[list[ClipItem], dict[int, str]]:
+            clips_all = self.plugin_manager.build_items()
+            tips_all = {
+                int(c.id): self._build_tooltip(c.content_text)
+                for c in clips_all
+                if getattr(c, "id", None) is not None
+            }
+            self.plugin_clip_model.set_clips(clips_all, subitems={}, tooltips=tips_all)
+            return clips_all, tips_all
+
+        # Initial or forced full rebuild.
+        if full or self.plugin_clip_model.rowCount() == 0:
+            clips, tips = _build_all()
+            if self._current_group_id == PLUGIN_GROUP_ID:
+                self.clip_model.set_clips(clips, subitems={}, tooltips=tips)
+            return clips, tips
+
+        # Incremental refresh: update only needed plugins to avoid destroying alive WebEngineViews.
+        clipboard_cache = None
+        changed = False
+        updated_items: list[ClipItem] = []
+        for plugin in self.plugin_manager.plugins:
+            uses_clip = getattr(plugin, "uses_clipboard", True)
+            if clipboard_only and not uses_clip:
+                continue
+            clip_txt = ""
+            if uses_clip:
+                if clipboard_cache is None:
+                    clipboard_cache = self._clipboard_text_for_plugins()
+                clip_txt = clipboard_cache
+            try:
+                items = plugin.build_items(clip_txt)
+            except Exception:
+                continue
+            for item in items:
+                print(
+                    "Updating item from plugin:",
+                    plugin.plugin_id,
+                    "Item ID:",
+                    getattr(item, "id", None),
+                )
+                cid = int(getattr(item, "id", -1))
+                self.plugin_clip_model._tooltips[cid] = self._build_tooltip(
+                    item.content_text
+                )
+                if self.plugin_clip_model.clip_for_id(cid):
+                    self.plugin_clip_model.update_clip(item)
+                    updated_items.append(item)
+                else:
+                    changed = True
+
+        # If any item was missing (new plugin etc.), fall back to full rebuild.
+        if changed:
+            clips, tips = _build_all()
+        else:
+            clips = self.plugin_clip_model._clips  # type: ignore[attr-defined]
+            tips = self.plugin_clip_model._tooltips  # type: ignore[attr-defined]
+
+        # Keep legacy clip_model in sync while plugins group is active.
         if self._current_group_id == PLUGIN_GROUP_ID:
-            self.refresh_items()
+            for item in updated_items:
+                cid = int(getattr(item, "id", -1))
+                self.clip_model._tooltips[cid] = self.plugin_clip_model._tooltips.get(
+                    cid, ""
+                )
+                if self.clip_model.clip_for_id(cid):
+                    self.clip_model.update_clip(item)
+                else:
+                    changed = True
+            if changed:
+                self.clip_model.set_clips(clips, subitems={}, tooltips=tips)
+
+        return clips, tips
+
+    def _refresh_plugins(self, clipboard_only: bool = True, full: bool = False) -> None:
+        """Rebuild plugin rows; defaults to updating only clipboard-driven plugins."""
+        clips, tooltips = self.refresh_plugin_items(
+            full=full, clipboard_only=clipboard_only
+        )
+        if self._current_group_id == PLUGIN_GROUP_ID:
+            # Keep the main clip model in sync while the Plugins tab is active.
+            self.clip_model.set_clips(clips, subitems={}, tooltips=tooltips)
 
     @Slot(str, str)
     def pluginAction(self, plugin_id: str, action_id: str) -> None:
@@ -702,12 +809,13 @@ class Backend(QObject):
 
     def refresh_items(self) -> None:
         if self._current_group_id == PLUGIN_GROUP_ID:
-            clips = self.plugin_manager.build_items()
-            tooltips = {
-                int(c.id): self._build_tooltip(c.content_text)
-                for c in clips
-                if getattr(c, "id", None) is not None
-            }
+            # First entry gets a full build; later refreshes update clipboard-driven plugins only.
+            clips, tooltips = self.refresh_plugin_items(
+                full=not self._plugin_initialized,
+                clipboard_only=self._plugin_initialized,
+            )
+            self._plugin_initialized = True
+            # Maintain clip_model for legacy bindings while plugin list is shown.
             self.clip_model.set_clips(clips, subitems={}, tooltips=tooltips)
             return
         rows = self.storage.list_items(self._current_group_id, None, previews_only=True)
@@ -2054,6 +2162,16 @@ class Backend(QObject):
             print(f"Clipboard extraction failed: {exc}")
             return
         self._process_clip(content_type, content_text, content_blob, preview_blob)
+        try:
+            # Notify plugins that depend on clipboard text.
+            self.plugin_manager.on_clipboard_changed(self._clipboard_text_for_plugins())
+        except Exception:
+            pass
+        # Refresh clipboard-driven plugins (e.g., Dictionary) without disturbing others.
+        try:
+            self._refresh_plugins(clipboard_only=True, full=False)
+        except Exception:
+            pass
 
     def _push_to_clipboard(self, clip: ClipItem) -> None:
         content_type = clip.content_type or "text"

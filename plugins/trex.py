@@ -138,6 +138,7 @@ tick();
 class TrexPlugin(Plugin):
     plugin_id = "trex"
     display_name = "T-Rex Runner"
+    uses_clipboard = False
 
     def __init__(
         self,

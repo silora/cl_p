@@ -271,6 +271,7 @@ HTML_TEMPLATE = """<!doctype html>
 class ColorPickerPlugin(Plugin):
     plugin_id = "colorpicker"
     display_name = "Color Picker"
+    uses_clipboard = False
 
     def __init__(
         self,
@@ -281,6 +282,7 @@ class ColorPickerPlugin(Plugin):
         self._refresh_callback = refresh_callback
 
     def build_items(self, clipboard_text: str) -> List[ClipItem]:
+        print("building colorpickers")
         now = int(time.time())
         default_hex = "#FACC15"
         fg = "#0d1117"

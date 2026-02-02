@@ -93,6 +93,7 @@ HTML = """<!doctype html>
 class GooglePlugin(Plugin):
     plugin_id = "google"
     display_name = "Google"
+    uses_clipboard = False
 
     def __init__(
         self,

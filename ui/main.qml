@@ -74,8 +74,11 @@ ApplicationWindow {
 
     WebEngineProfile {
         id: pluginProfile
-        persistentCookiesPolicy: WebEngineProfile.NoPersistentCookies
-        httpCacheType: WebEngineProfile.MemoryHttpCache
+        // Give the profile a stable name so WebEngine persists cookies/cache across app restarts.
+        storageName: "clp-plugins"
+        offTheRecord: false
+        persistentCookiesPolicy: WebEngineProfile.AllowPersistentCookies
+        httpCacheType: WebEngineProfile.DiskHttpCache
     }
 
     function addAlphaToColor(hexColor, alpha) {
@@ -120,29 +123,40 @@ ApplicationWindow {
                    + b.toString(16).padStart(2, "0");
     }
 
+    function activeListView() {
+        return backend.currentGroupId === backend.pluginsGroupId ? pluginList : clipList
+    }
+
+    function activeModel() {
+        return backend.currentGroupId === backend.pluginsGroupId ? pluginClipModel : clipModel
+    }
+
     function snapshotScrollForDelegate(clipId, delegateY) {
-        if (!clipList) return
+        var view = activeListView()
+        if (!view) return
         savedAnchorId = clipId
-        savedAnchorOffset = delegateY - clipList.contentY
+        savedAnchorOffset = delegateY - view.contentY
         pendingScrollRestore = true
         _restoreTries = 0
-        console.log("Snapshot scroll for clip", clipId, "offset", savedAnchorOffset, "contentY", clipList.contentY)
+        console.log("Snapshot scroll for clip", clipId, "offset", savedAnchorOffset, "contentY", view.contentY)
     }
 
     function _resolveAnchorIndex() {
-        if (!clipModel || savedAnchorId < 0) return -1
-        if (clipModel.indexOfId) return clipModel.indexOfId(savedAnchorId)
-        if (clipModel.rowForId) return clipModel.rowForId(savedAnchorId)
-        if (clipModel.count !== undefined && clipModel.idAt) {
-            for (var i = 0; i < clipModel.count; ++i) {
-                if (clipModel.idAt(i) === savedAnchorId) return i
+        var model = activeModel()
+        if (!model || savedAnchorId < 0) return -1
+        if (model.indexOfId) return model.indexOfId(savedAnchorId)
+        if (model.rowForId) return model.rowForId(savedAnchorId)
+        if (model.count !== undefined && model.idAt) {
+            for (var i = 0; i < model.count; ++i) {
+                if (model.idAt(i) === savedAnchorId) return i
             }
         }
         return -1
     }
 
     function restoreScrollWhenStable() {
-        if (!clipList || !pendingScrollRestore) return
+        var view = activeListView()
+        if (!view || !pendingScrollRestore) return
 
         var idx = _resolveAnchorIndex()
         if (idx < 0) {
@@ -152,13 +166,13 @@ ApplicationWindow {
             return
         }
 
-        clipList.positionViewAtIndex(idx, ListView.Beginning)
+        view.positionViewAtIndex(idx, ListView.Beginning)
 
         Qt.callLater(function() {
-            var target = clipList.contentY - savedAnchorOffset
-            var maxY = Math.max(0, clipList.contentHeight - clipList.height)
+            var target = view.contentY - savedAnchorOffset
+            var maxY = Math.max(0, view.contentHeight - view.height)
             target = Math.max(0, Math.min(maxY, target))
-            clipList.contentY = target
+            view.contentY = target
 
             Qt.callLater(function() {
                 if (!pendingScrollRestore) return
@@ -704,6 +718,12 @@ ApplicationWindow {
                     id: clipList
                     anchors.fill: parent
                     anchors.margins: 8
+                    property bool active: backend.currentGroupId !== backend.pluginsGroupId
+                    opacity: active ? 1 : 0
+                    enabled: active
+                    visible: active
+                    // enabled: visible
+                    z: active ? 1 : 0
                     property bool dragLocked: false
                     property var rootWindow: window
                     interactive: !dragLocked
@@ -1079,11 +1099,11 @@ ApplicationWindow {
                                                         Component.onCompleted: reloadHtml()
                                                         onHtmlSourceChanged: reloadHtml()
                                                         onVisibleChanged: {
-                                                            if (!visible) {
-                                                                // Cancel in-flight renders when leaving the plugins tab to avoid WebEngine crashes.
+                                                            // Keep plugin WebViews alive across tab switches; only unload for non-plugin items.
+                                                            if (!delegateRoot.isPluginItem && !visible) {
                                                                 stop();
                                                                 loadHtml("", "about:blank");
-                                                            } else {
+                                                            } else if (visible) {
                                                                 reloadHtml();
                                                             }
                                                         }
@@ -1938,6 +1958,55 @@ ApplicationWindow {
 
                     onCurrentIndexChanged: window.selectedClipId = clipModel.idAt(currentIndex)
                 }
+
+                // Dedicated view for plugin items; kept alive even when hidden so WebEngineView delegates persist.
+                ListView {
+                    id: pluginList
+                    anchors.fill: parent
+                    anchors.margins: 8
+                    property bool active: backend.currentGroupId === backend.pluginsGroupId
+                    opacity: active ? 1 : 0
+                    enabled: active
+                    z: active ? 1 : 0
+                    property bool dragLocked: false
+                    property var rootWindow: window
+                    interactive: !dragLocked
+                    model: pluginClipModel
+                    spacing: 12
+                    clip: true
+                    maximumFlickVelocity: 5000
+                    flickDeceleration: 1500
+                    cacheBuffer: Math.max(0, height * 3)
+                    onContentHeightChanged: if (active) window.restoreScrollWhenStable()
+                    onCountChanged: {
+                        if (currentIndex >= count) {
+                            currentIndex = -1
+                            window.selectedClipId = -1
+                        }
+                        if (active) window.restoreScrollWhenStable()
+                    }
+                    ScrollBar.vertical: ScrollBar {
+                        policy: ScrollBar.AsNeeded
+                        implicitWidth: 12
+                        minimumSize: 0.1
+                        anchors.right: parent.right
+                        anchors.rightMargin: 0
+                        anchors.top: parent.top
+                        anchors.bottom: parent.bottom
+                    }
+
+                    Connections {
+                        target: backend
+                        function onCurrentGroupChanged() {
+                            pluginList.currentIndex = -1
+                            window.selectedClipId = -1
+                        }
+                    }
+
+                    delegate: clipList.delegate
+
+                    onCurrentIndexChanged: if (visible) window.selectedClipId = pluginClipModel.idAt(currentIndex)
+                }
             }
 
             Rectangle {
@@ -2231,11 +2300,14 @@ ApplicationWindow {
         }
         function onItemAdded(itemId, row) {
             if (row < 0) return
+            if (backend.currentGroupId === backend.pluginsGroupId) return
+            var view = activeListView()
+            if (!view) return
             window.pendingScrollRestore = false
             window.selectedClipId = itemId
-            clipList.currentIndex = row
+            view.currentIndex = row
             Qt.callLater(function() {
-                clipList.positionViewAtIndex(row, ListView.Beginning)
+                view.positionViewAtIndex(row, ListView.Beginning)
             })
         }
     }

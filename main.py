@@ -85,6 +85,7 @@ def main() -> int:
     engine = QQmlApplicationEngine()
     engine.rootContext().setContextProperty("backend", backend)
     engine.rootContext().setContextProperty("clipModel", backend.clip_model)
+    engine.rootContext().setContextProperty("pluginClipModel", backend.plugin_clip_model)
     engine.rootContext().setContextProperty("groupModel", backend.group_model)
     engine.rootContext().setContextProperty("appIconPath", str(icon_path))
     engine.rootContext().setContextProperty("paletteGrays", palette.get("grays"))
