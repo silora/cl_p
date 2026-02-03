@@ -48,6 +48,33 @@ class PluginManager:
             items.extend(plugin_items)
         return items
 
+    def build_items_for(self, plugin_id: str) -> List[ClipItem]:
+        """
+        Build items only for the specified plugin_id; falls back to [] on failure.
+        """
+        clipboard_text_cache = None
+        out: list[ClipItem] = []
+        for plugin in self._plugins:
+            if getattr(plugin, "plugin_id", None) != plugin_id:
+                continue
+            clip_txt = ""
+            if getattr(plugin, "uses_clipboard", True):
+                if clipboard_text_cache is None:
+                    clipboard_text_cache = self._clipboard_text_provider() or ""
+                clip_txt = clipboard_text_cache
+            try:
+                plugin_items = plugin.build_items(clip_txt)
+            except Exception:
+                plugin_items = []
+            base = getattr(plugin, "_id_base", -1000)
+            for idx, item in enumerate(plugin_items):
+                try:
+                    item.id = int(base - idx)
+                except Exception:
+                    pass
+            out.extend(plugin_items)
+        return out
+
     def dispatch_action(self, plugin_id: str, action_id: str, backend, payload=None) -> bool:
         for plugin in self._plugins:
             if getattr(plugin, "plugin_id", None) == plugin_id:

@@ -19,79 +19,84 @@ HTML = """<!doctype html>
 <head>
   <meta charset="utf-8" />
   <style>
-    :root { color-scheme: light dark; }
+    :root { color-scheme: light; }
     * { box-sizing: border-box; }
     body {
       margin: 0;
       padding: 0;
       font-family: __FONT__;
-      background: #0b132b;
-      color: #e0e6ed;
+      background: #f7f8fb;
+      color: #0f172a;
       display: grid;
       place-items: center;
       min-height: 100vh;
     }
     .card {
-      width: min(740px, 94vw);
-      background: #111827;
-      border: 1px solid #1f2937;
-      border-radius: 14px;
-      padding: 22px;
-      box-shadow: 0 18px 50px rgba(0,0,0,0.35);
-      text-align: center;
+      width: min(820px, 96vw);
+      background: #ffffff;
+      border: 1px solid #e5e7eb;
+      border-radius: 16px;
+      padding: 18px;
+      box-shadow: 0 18px 48px rgba(15, 23, 42, 0.12);
       display: flex;
       flex-direction: column;
       gap: 12px;
+      text-align: center;
     }
-    h1 { margin: 0; font-size: 22px; letter-spacing: 0.3px; }
-    p { margin: 0; color: #cbd5e1; line-height: 1.5; }
+    h1 { margin: 0; font-size: 22px; letter-spacing: 0.2px; }
+    p  { margin: 0; color: #475569; line-height: 1.6; }
+    .actions { display: flex; gap: 10px; justify-content: center; flex-wrap: wrap; }
     button {
       cursor: pointer;
-      margin-top: 8px;
-      align-self: center;
-      background: linear-gradient(135deg, #34d399, #10b981);
-      color: white;
       border: none;
       border-radius: 12px;
-      padding: 12px 20px;
+      padding: 12px 18px;
       font-size: 15px;
       font-weight: 600;
-      min-width: 180px;
-      box-shadow: 0 8px 24px rgba(16,185,129,0.35);
+      background: linear-gradient(135deg, #10b981, #14b8a6);
+      color: white;
+      box-shadow: 0 10px 24px rgba(20,184,166,0.32);
+      transition: transform 90ms ease, filter 90ms ease;
     }
     button:hover { filter: brightness(1.05); }
-    .hint { font-size: 13px; color: #94a3b8; }
+    button:active { transform: translateY(1px); }
+    .hint { font-size: 13px; color: #64748b; }
   </style>
 </head>
-<body bgcolor="#212121">
+<body bgcolor="#0a152f">
   <div class="card">
-    <h1>Open Google</h1>
-    <p>Loads the full google.com experience inside cl_p.<br>
-       Sign in once; your session stays cached between launches.</p>
-    <button onclick="openGoogle()">Go to Google</button>
-    <div class="hint">If the page looks blank, your network may block google.com. Click again to retry.</div>
+    <h1>Flaticon Search</h1>
+    <p>Browse icons from <strong>flaticon.com</strong> without leaving cl_p.</p>
+    <div class="actions">
+      <button onclick="openSearch()">Open Flaticon</button>
+    </div>
+    <div class="hint" id="hint"></div>
   </div>
   <script>
-    const initialTerm = "__QUERY__";
-    const target = initialTerm
-      ? "https://www.google.com/search?q=" + encodeURIComponent(initialTerm)
-      : "https://www.google.com/";
-    let navigated = false;
-    function openGoogle() {
-      if (navigated) return;
-      navigated = true;
-      window.location = target;
+    const query = "__QUERY__";
+    const hint = document.getElementById("hint");
+    function targetUrl() {
+      if (!query) return "https://www.flaticon.com/";
+      return "https://www.flaticon.com/search?word=" + encodeURIComponent(query);
     }
-    setTimeout(openGoogle, 120);
+    function openSearch() {
+      window.location = targetUrl();
+    }
+    if (query) {
+      hint.textContent = "Searching for: " + query;
+      setTimeout(openSearch, 80);
+    } else {
+      hint.textContent = "Click to open Flaticon home, or use the context action to search selected text.";
+    }
   </script>
 </body>
 </html>
 """
 
 
-class GooglePlugin(Plugin):
-    plugin_id = "google"
-    display_name = "Google"
+class FlaticonPlugin(Plugin):
+    plugin_id = "flaticon"
+    display_name = "Flaticon"
     uses_clipboard = False
 
     def __init__(
@@ -110,12 +115,12 @@ class GooglePlugin(Plugin):
         html = HTML.replace("__FONT__", font).replace(
             "__QUERY__", query.replace('"', '\\"')
         )
-        preview = f"Google · {query}" if query else "Google"
+        preview = f"Flaticon · {query}" if query else "Flaticon"
         return [
             ClipItem(
                 id=-1000,
                 content_type="html",
-                content_text="Google",
+                content_text="Flaticon",
                 content_blob=html.encode("utf-8"),
                 created_at=now,
                 pinned=False,
@@ -130,7 +135,7 @@ class GooglePlugin(Plugin):
                 render_mode="web",
                 plugin_id=self.plugin_id,
                 extra_actions=[
-                    {"id": "search_clip", "text": "Search with clip"},
+                    {"id": "search_clip", "text": "Search clip text"},
                 ],
             )
         ]
@@ -139,23 +144,18 @@ class GooglePlugin(Plugin):
         if action_id == "search_clip":
             try:
                 getter = getattr(backend, "_clipboard_text_for_plugins", None)
-                text = getter() if callable(getter) else ""
+                clip_txt = getter() if callable(getter) else ""
             except Exception:
-                text = ""
-            query = (text or "").strip()
-            print(f"GooglePlugin: on_action search_clip with query: {query!r}")
+                clip_txt = ""
+            query = (clip_txt or "").strip()
             if not query:
                 return False
             self._pending_query = query[:200]
             try:
-                # Ask backend to refresh only this plugin to avoid nuking other views.
                 if hasattr(backend, "refresh_single_plugin"):
                     backend.refresh_single_plugin(self.plugin_id)
                 else:
-                    try:
-                        self._refresh_callback(clipboard_only=False, full=False)
-                    except TypeError:
-                        self._refresh_callback()
+                    self._refresh_callback(clipboard_only=False, full=False)
             except Exception:
                 pass
             return True

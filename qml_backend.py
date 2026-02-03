@@ -33,11 +33,13 @@ from PySide6.QtGui import QColor, QCursor, QFont, QGuiApplication, QImage, QPain
 
 from item import ClipItem, item_from_row
 from operations.llm import run_task
+from plugins.calculator import CalculatorPlugin
 from plugins.chatgpt import ChatGPTPlugin
 from plugins.colorpicker import ColorPickerPlugin
 from plugins.datetime import DateTimePlugin
 from plugins.dictionary import DictionaryPlugin
 from plugins.google import GooglePlugin
+from plugins.flaticon import FlaticonPlugin
 from plugins.manager import PluginManager
 from plugins.trex import TrexPlugin
 from storage import Storage
@@ -563,9 +565,14 @@ class Backend(QObject):
                 refresh_callback=self._refresh_plugins,
             )
         )
-        self.plugin_manager.register(DateTimePlugin(group_id=PLUGIN_GROUP_ID))
         self.plugin_manager.register(
             ChatGPTPlugin(
+                group_id=PLUGIN_GROUP_ID,
+                refresh_callback=self._refresh_plugins,
+            )
+        )
+        self.plugin_manager.register(
+            CalculatorPlugin(
                 group_id=PLUGIN_GROUP_ID,
                 refresh_callback=self._refresh_plugins,
             )
@@ -576,12 +583,19 @@ class Backend(QObject):
         #         refresh_callback=self._refresh_plugins,
         #     )
         # )
-        # self.plugin_manager.register(
-        #     GooglePlugin(
-        #         group_id=PLUGIN_GROUP_ID,
-        #         refresh_callback=self._refresh_plugins,
-        #     )
-        # )
+        self.plugin_manager.register(
+            GooglePlugin(
+                group_id=PLUGIN_GROUP_ID,
+                refresh_callback=self._refresh_plugins,
+            )
+        )
+        self.plugin_manager.register(
+            FlaticonPlugin(
+                group_id=PLUGIN_GROUP_ID,
+                refresh_callback=self._refresh_plugins,
+            )
+        )
+        self.plugin_manager.register(DateTimePlugin(group_id=PLUGIN_GROUP_ID))
         self.refresh_groups()
         self.refresh_items()
 
@@ -766,6 +780,37 @@ class Backend(QObject):
         """Dispatch a plugin-specific context action with optional payload."""
         self.plugin_manager.dispatch_action(plugin_id, action_id, self, payload)
 
+    def refresh_single_plugin(self, plugin_id: str) -> None:
+        """
+        Rebuild only one plugin's items and patch both models.
+        """
+        try:
+            items = self.plugin_manager.build_items_for(plugin_id)
+        except Exception:
+            return
+        if not items:
+            return
+        for item in items:
+            cid = int(getattr(item, "id", -1))
+            self.plugin_clip_model._tooltips[cid] = self._build_tooltip(
+                item.content_text
+            )
+            if self.plugin_clip_model.clip_for_id(cid):
+                self.plugin_clip_model.update_clip(item)
+            else:
+                # If missing, fall back to full refresh for safety.
+                self.refresh_plugin_items(full=True)
+                return
+            if self._current_group_id == PLUGIN_GROUP_ID:
+                if self.clip_model.clip_for_id(cid):
+                    self.clip_model.update_clip(item)
+                else:
+                    self.clip_model.set_clips(
+                        self.plugin_clip_model._clips,  # type: ignore[attr-defined]
+                        subitems={},
+                        tooltips=self.plugin_clip_model._tooltips,  # type: ignore[attr-defined]
+                    )
+
     def plugin_set_clipboard_and_paste(self, text: str) -> None:
         """Helper for plugins to push text and paste."""
         try:
@@ -808,7 +853,7 @@ class Backend(QObject):
         self.destinationGroupChanged.emit()
 
     def refresh_items(self) -> None:
-        if self._current_group_id == PLUGIN_GROUP_ID:
+        if self._current_group_id == PLUGIN_GROUP_ID and not self._plugin_initialized:
             # First entry gets a full build; later refreshes update clipboard-driven plugins only.
             clips, tooltips = self.refresh_plugin_items(
                 full=not self._plugin_initialized,

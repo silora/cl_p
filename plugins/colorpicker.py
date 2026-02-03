@@ -12,9 +12,9 @@ HTML_TEMPLATE = """<!doctype html>
   <meta charset="utf-8" />
   <style>
     body { margin: 0; font-family: __FONT__; font-size: 14pt; background: __HEX__; color: __FG__; transition: color 120ms ease; }
-    .wrap { padding: 12px; display: flex; gap: 16px; align-items: stretch; }
+    .wrap { padding: 0px; display: flex; gap: 16px; align-items: stretch; }
     .left { width: 220px; display: flex; flex-direction: column; gap: 10px; }
-    .swatch-split { display: flex; flex-direction: column; gap: 6px; min-height: 125px; }
+    .swatch-split { display: flex; flex-direction: column; gap: 3px; min-height: 125px; }
     .swatch {
       flex: 1;
       border-radius: 12px;
@@ -34,7 +34,7 @@ HTML_TEMPLATE = """<!doctype html>
     .rgb { font-size: 11pt; opacity: 0.9; }
     #hue {
       width: 100%;
-      height: 16px;
+      height: 14px;
       border-radius: 8px;
       border: none;
       display: block;
@@ -315,8 +315,8 @@ class ColorPickerPlugin(Plugin):
                 preview_blob=None,
                 has_full_content=True,
                 content_length=len(html),
-                collapsed_height=180,
-                expanded_height=180,
+                collapsed_height=150,
+                expanded_height=150,
                 render_mode="web",
                 plugin_id=self.plugin_id,
                 extra_actions=actions,

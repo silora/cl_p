@@ -1235,17 +1235,39 @@ ApplicationWindow {
                                             }
                                         }
 
-                                        MouseArea {
-                                            id: pressArea
-                                            anchors.fill: contentPanel
-                                            acceptedButtons: delegateRoot.isPluginItem && delegateRoot.clipRenderMode === "web"
-                                                              ? Qt.RightButton    // let left clicks fall through to WebEngineView
-                                                              : (Qt.LeftButton | Qt.RightButton)
-                                            hoverEnabled: true
-                                            preventStealing: delegateRoot.longPressActive
-                                            propagateComposedEvents: true
-                                            z: 0
+                                    MouseArea {
+                                        id: pressArea
+                                        anchors.fill: contentPanel
+                                        property bool isPluginWeb: delegateRoot.isPluginItem && delegateRoot.clipRenderMode === "web"
+                                        // For plugin web views, let hover pass through but keep right-clicks for our menu.
+                                        hoverEnabled: !isPluginWeb
+                                        acceptedButtons: isPluginWeb
+                                                          ? Qt.RightButton   // capture context clicks only
+                                                          : (Qt.LeftButton | Qt.RightButton)
+                                        preventStealing: delegateRoot.longPressActive
+                                        propagateComposedEvents: true
+                                        z: 0
 
+                                            onPressed: function(mouse) {
+                                                if (mouse.button === Qt.RightButton) {
+                                                    // Always handle our own context menu.
+                                                    var p = pressArea.mapToItem(Overlay.overlay, mouse.x, mouse.y)
+                                                    contextMenu.x = p.x
+                                                    contextMenu.y = p.y
+                                                    contextMenu.popup()
+                                                    mouse.accepted = true
+                                                    clipList.currentIndex = index
+                                                    clipList.rootWindow.selectedClipId = delegateRoot.clipId
+                                                    return
+                                                }
+                                                if (isPluginWeb) {
+                                                    // Let left/middle fall through to WebEngineView.
+                                                    mouse.accepted = false
+                                                    return
+                                                }
+                                                // Default: accept and handle.
+                                                mouse.accepted = true
+                                            }
                                             onClicked: function(mouse) {
                                                 if (delegateRoot.isPluginItem && delegateRoot.clipRenderMode === "web") {
                                                     mouse.accepted = false
@@ -1296,15 +1318,6 @@ ApplicationWindow {
                                             onReleased: delegateRoot.endLongPress()
                                             onCanceled: delegateRoot.endLongPress()
 
-                                            onPressed: function(mouse) {
-                                                if (mouse.button === Qt.RightButton) {
-                                                    var p = pressArea.mapToItem(Overlay.overlay, mouse.x, mouse.y)
-                                                    contextMenu.x = p.x
-                                                    contextMenu.y = p.y
-                                                    contextMenu.popup()
-                                                    mouse.accepted = true
-                                                }
-                                            }
                                         }
 
                                         Rectangle {
@@ -1972,11 +1985,66 @@ ApplicationWindow {
                     property var rootWindow: window
                     interactive: !dragLocked
                     model: pluginClipModel
-                    spacing: 12
+                    spacing: 6
                     clip: true
+                    snapMode: ListView.NoSnap
+                    preferredHighlightBegin: 0
+                    preferredHighlightEnd: 0
+                    // highlightRangeMode: ListView.NoHighlight
                     maximumFlickVelocity: 5000
                     flickDeceleration: 1500
                     cacheBuffer: Math.max(0, height * 3)
+                    // Collect snap targets from visible items and shift the view the minimal distance
+                    // so one of them aligns to the top or bottom edge.
+                    function snapToNearestObservationPoint() {
+                        if (!active || !visible || count === 0) return
+                        if (contentHeight <= height) return
+
+                        var viewTop = contentY
+                        var viewBottom = contentY + height
+                        var children = contentItem ? contentItem.children : []
+                        var visibleItems = []
+
+                        for (var i = 0; i < children.length; ++i) {
+                            var c = children[i]
+                            if (!c || !c.visible || typeof c.y !== "number" || typeof c.height !== "number") continue
+                            var top = c.y
+                            var bottom = top + c.height
+                            if (bottom < viewTop || top > viewBottom) continue
+                            visibleItems.push({ top: top, bottom: bottom })
+                        }
+
+                        if (visibleItems.length === 0) return
+                        visibleItems.sort(function(a, b) { return a.top - b.top })
+
+                        var points = []
+                        points.push(visibleItems[0].top)
+                        points.push(visibleItems[visibleItems.length - 1].bottom)
+                        for (var j = 0; j < visibleItems.length - 1; ++j) {
+                            var gapCenter = (visibleItems[j].bottom + visibleItems[j + 1].top) / 2
+                            // var gapCenter = visibleItems[j + 1].top
+                            // points.push(visibleItems[j + 1].top)
+                            // points.push(visibleItems[j].bottom)
+                            points.push(gapCenter)
+                        }
+
+                        var bestDelta = null
+                        for (var k = 0; k < points.length; ++k) {
+                            var p = points[k]
+                            var deltaTop = p - viewTop
+                            var deltaBottom = p - viewBottom
+                            var delta = Math.abs(deltaTop) <= Math.abs(deltaBottom) ? deltaTop : deltaBottom
+                            if (bestDelta === null || Math.abs(delta) < Math.abs(bestDelta)) bestDelta = delta
+                        }
+
+                        if (bestDelta === null) return
+                        var target = contentY + bestDelta
+                        var maxY = Math.max(0, contentHeight - height)
+                        target = Math.min(Math.max(0, target), maxY)
+                        if (Math.abs(target - contentY) > 0.5) contentY = target
+                    }
+
+                    onMovementEnded: snapToNearestObservationPoint()
                     onContentHeightChanged: if (active) window.restoreScrollWhenStable()
                     onCountChanged: {
                         if (currentIndex >= count) {
@@ -1986,6 +2054,7 @@ ApplicationWindow {
                         if (active) window.restoreScrollWhenStable()
                     }
                     ScrollBar.vertical: ScrollBar {
+                        id: pluginScroll
                         policy: ScrollBar.AsNeeded
                         implicitWidth: 12
                         minimumSize: 0.1
@@ -1993,6 +2062,8 @@ ApplicationWindow {
                         anchors.rightMargin: 0
                         anchors.top: parent.top
                         anchors.bottom: parent.bottom
+                        // Snap after the scrollbar thumb is released; avoid using active since it toggles on hover.
+                        onPressedChanged: if (!pressed) Qt.callLater(pluginList.snapToNearestObservationPoint)
                     }
 
                     Connections {

@@ -16,6 +16,8 @@ from ui.super_rich_text_item import SuperRichTextItem
 
 # Avoid non-integral scale factors that WebEngine rejects; override any env drift.
 os.environ["QT_SCALE_FACTOR"] = "1.0"
+# Some GPUs/drivers emit "Compositor returned null texture" with WebEngine; prefer software compositing for stability.
+os.environ.setdefault("QTWEBENGINE_CHROMIUM_FLAGS", "--disable-gpu --disable-software-rasterizer")
 
 APP_NAME = "cl_p"
 DB_NAME = "cl_p.sqlite3"
