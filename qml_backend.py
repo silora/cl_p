@@ -38,9 +38,11 @@ from plugins.chatgpt import ChatGPTPlugin
 from plugins.colorpicker import ColorPickerPlugin
 from plugins.datetime import DateTimePlugin
 from plugins.dictionary import DictionaryPlugin
-from plugins.google import GooglePlugin
 from plugins.flaticon import FlaticonPlugin
+from plugins.google import GooglePlugin
+from plugins.image_edit import ImageEditPlugin
 from plugins.manager import PluginManager
+from plugins.piano import PianoPlugin
 from plugins.trex import TrexPlugin
 from storage import Storage
 from utils.drawio import is_drawio_payload, url_to_png
@@ -57,8 +59,11 @@ PLUGIN_BASE_COLORS: dict[str, str] = {}
 PREVIEW_TEXT_LIMIT = 800
 PREVIEW_HTML_LIMIT = 1200
 PREVIEW_IMAGE_MAX_DIM = 300
+DRAWIO_CONTENT_MAX_DIM = 600
 PLUGIN_GROUP_ID = -99
 PLUGIN_CLIP_ID = -1000
+DEFAULT_VISIBLE_ITEM_LIMIT = 120
+VISIBLE_ITEM_LIMIT_STEP = 120
 
 
 @dataclass
@@ -166,6 +171,48 @@ class GroupListModel(QAbstractListModel):
         return sum(1 for g in self._groups if getattr(g, "is_special", False))
 
 
+class GroupSliceModel(QAbstractListModel):
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self._groups: list[GroupEntry] = []
+
+    def rowCount(self, parent=QModelIndex()) -> int:  # type: ignore[override]
+        if parent.isValid():
+            return 0
+        return len(self._groups)
+
+    def data(self, index: QModelIndex, role: int = Qt.DisplayRole):  # type: ignore[override]
+        if not index.isValid():
+            return None
+        row = index.row()
+        if row < 0 or row >= len(self._groups):
+            return None
+        group = self._groups[row]
+        if role == GroupListModel.IdRole:
+            return int(group.id)
+        if role == GroupListModel.NameRole:
+            return group.name
+        if role == GroupListModel.SpecialRole:
+            return bool(group.is_special)
+        if role == GroupListModel.PluginRole:
+            return bool(getattr(group, "is_plugin", False))
+        return None
+
+    def roleNames(self) -> dict[int, bytes]:  # type: ignore[override]
+        return {
+            GroupListModel.IdRole: b"id",
+            GroupListModel.NameRole: b"name",
+            GroupListModel.SpecialRole: b"isSpecial",
+            GroupListModel.PluginRole: b"isPlugin",
+        }
+
+    def set_groups(self, groups: Iterable[GroupEntry]) -> None:
+        groups_list = list(groups)
+        self.beginResetModel()
+        self._groups = groups_list
+        self.endResetModel()
+
+
 class ClipListModel(QAbstractListModel):
     IdRole = Qt.UserRole + 1
     LabelRole = Qt.UserRole + 2
@@ -175,6 +222,7 @@ class ClipListModel(QAbstractListModel):
     PinnedRole = Qt.UserRole + 6
     GroupRole = Qt.UserRole + 7
     PreviewRole = Qt.UserRole + 8
+    FullPreviewRole = Qt.UserRole + 25
     SubitemsRole = Qt.UserRole + 9
     TooltipRole = Qt.UserRole + 10
     ContentBlobRole = Qt.UserRole + 11
@@ -238,6 +286,8 @@ class ClipListModel(QAbstractListModel):
             return int(clip.group_id)
         if role == self.PreviewRole:
             return self._preview_url(clip)
+        if role == self.FullPreviewRole:
+            return self._full_preview_url(clip)
         if role == self.SubitemsRole:
             return self._subitems.get(int(clip.id), [])
         if role == self.TooltipRole:
@@ -280,6 +330,7 @@ class ClipListModel(QAbstractListModel):
             self.PinnedRole: b"pinned",
             self.GroupRole: b"groupId",
             self.PreviewRole: b"preview",
+            self.FullPreviewRole: b"fullPreview",
             self.SubitemsRole: b"subitems",
             self.TooltipRole: b"tooltip",
             self.ContentBlobRole: b"contentBlob",
@@ -360,6 +411,7 @@ class ClipListModel(QAbstractListModel):
             self.ContentBlobRole,
             self.HtmlRole,
             self.PreviewRole,
+            self.FullPreviewRole,
             self.PreviewTextRole,
             self.TooltipRole,
             self.BaseColorRole,
@@ -402,6 +454,25 @@ class ClipListModel(QAbstractListModel):
             return f"data:{mime};base64,{encoded}"
         except Exception:
             return ""
+
+    def _full_preview_url(self, clip: ClipItem) -> str:
+        if clip.content_type not in ("image", "svg+xml", "drawio"):
+            return ""
+        data: Optional[bytes] = None
+        mime = "image/png"
+        if clip.content_type == "svg+xml" and clip.content_blob:
+            data = clip.content_blob
+            mime = "image/svg+xml"
+        elif clip.content_blob:
+            data = clip.content_blob
+            mime = "image/png"
+        if not data:
+            return self._preview_url(clip)
+        try:
+            encoded = base64.b64encode(data).decode("ascii")
+            return f"data:{mime};base64,{encoded}"
+        except Exception:
+            return self._preview_url(clip)
 
     @staticmethod
     def _html_content(clip: ClipItem) -> str:
@@ -507,14 +578,22 @@ class Backend(QObject):
     currentGroupChanged = Signal()
     destinationGroupChanged = Signal()
     searchChanged = Signal()
+    maxItemsPerGroupChanged = Signal()
+    scaledImageMaxDimChanged = Signal()
     itemAdded = Signal(int, int)  # item_id, row
     operationRunningChanged = Signal(bool)
     clipboardExtracted = Signal(object)
+    previewReady = Signal(int, object, object)
+    drawioPreviewReady = Signal(int, object, object)
+    clipboardImageEditReady = Signal(object)
+    hasMoreItemsChanged = Signal()
+    imagePreviewBackfillFinished = Signal()
 
     def __init__(self, storage: Storage, parent=None) -> None:
         super().__init__(parent)
         self.storage = storage
         self.group_model = GroupListModel()
+        self.remaining_group_model = GroupSliceModel()
         self.clip_model = ClipListModel()
         self.plugin_clip_model = ClipListModel()
         self._current_group_id: Optional[int] = None
@@ -536,6 +615,10 @@ class Backend(QObject):
         self._clipboard = QGuiApplication.clipboard()
         self._clipboard.dataChanged.connect(self._on_clipboard_changed)
         self.clipboardExtracted.connect(self._handle_clip_future)
+        self.previewReady.connect(self._on_preview_ready)
+        self.drawioPreviewReady.connect(self._on_drawio_preview_ready)
+        self.clipboardImageEditReady.connect(self._apply_edited_clipboard_image)
+        self.imagePreviewBackfillFinished.connect(self._on_image_preview_backfill_finished)
         self._op_worker: Optional[OperationWorker] = None
         self._op_running: bool = False
         self._default_group_id: int = self._get_default_group_id()
@@ -548,10 +631,20 @@ class Backend(QObject):
         self._drawio_preview_lock = threading.Lock()
         self._plugin_initialized: bool = False
         self._plugin_base_colors: dict[str, str] = {}
+        self._shutting_down = False
+        self._visible_item_limit = DEFAULT_VISIBLE_ITEM_LIMIT
+        self._has_more_items = False
+        self._image_preview_backfill_started = False
+        self._max_items_per_group = self._load_max_items_per_group()
+        self._scaled_image_max_dim = self._load_scaled_image_max_dim()
+
+        print("Initializing plugins...")
         self.plugin_manager = PluginManager(
             group_id=PLUGIN_GROUP_ID,
             clipboard_text_provider=self._clipboard_text_for_plugins,
         )
+
+        print("Registering DictionaryPlugin...")
         self.plugin_manager.register(
             DictionaryPlugin(
                 group_id=PLUGIN_GROUP_ID,
@@ -559,18 +652,38 @@ class Backend(QObject):
                 refresh_callback=self._refresh_plugins,
             )
         )
+
+        print("Registering ColorPickerPlugin...")
         self.plugin_manager.register(
             ColorPickerPlugin(
                 group_id=PLUGIN_GROUP_ID,
                 refresh_callback=self._refresh_plugins,
             )
         )
+        # self.plugin_manager.register(
+        #     ImageEditPlugin(
+        #         group_id=PLUGIN_GROUP_ID,
+        #         refresh_callback=self._refresh_plugins,
+        #     )
+        # )
+
+        print("Registering PianoPlugin...")
+        self.plugin_manager.register(
+            PianoPlugin(
+                group_id=PLUGIN_GROUP_ID,
+                refresh_callback=self._refresh_plugins,
+            )
+        )
+
+        print("Registering ChatGPTPlugin...")
         self.plugin_manager.register(
             ChatGPTPlugin(
                 group_id=PLUGIN_GROUP_ID,
                 refresh_callback=self._refresh_plugins,
             )
         )
+
+        print("Registering CalculatorPlugin...")
         self.plugin_manager.register(
             CalculatorPlugin(
                 group_id=PLUGIN_GROUP_ID,
@@ -596,8 +709,13 @@ class Backend(QObject):
             )
         )
         self.plugin_manager.register(DateTimePlugin(group_id=PLUGIN_GROUP_ID))
+
+        print("Loading groups and items...")
         self.refresh_groups()
+        print("Groups loaded:", self.group_model.rowCount())
         self.refresh_items()
+        print("Items loaded:", self.clip_model.rowCount())
+        self._start_image_preview_backfill()
 
     @Property(int, notify=currentGroupChanged)
     def currentGroupId(self) -> int:
@@ -611,9 +729,21 @@ class Backend(QObject):
     def searchText(self) -> str:
         return self._search_text
 
+    @Property(int, notify=maxItemsPerGroupChanged)
+    def maxItemsPerGroup(self) -> int:
+        return int(self._max_items_per_group)
+
+    @Property(int, notify=scaledImageMaxDimChanged)
+    def scaledImageMaxDim(self) -> int:
+        return int(self._scaled_image_max_dim)
+
     @Property(bool, notify=operationRunningChanged)
     def operationRunning(self) -> bool:
         return self._op_running
+
+    @Property(bool, notify=hasMoreItemsChanged)
+    def hasMoreItems(self) -> bool:
+        return bool(self._has_more_items)
 
     @Property(int, constant=True)
     def pluginsGroupId(self) -> int:
@@ -623,10 +753,59 @@ class Backend(QObject):
     def pluginClipModel(self) -> QObject:
         return self.plugin_clip_model
 
+    @Property(QObject, constant=True)
+    def remainingGroupModel(self) -> QObject:
+        return self.remaining_group_model
+
     @Slot(QObject)
     def setWindow(self, window: QObject) -> None:
         self._window = window
         self._register_hotkeys()
+
+    @Slot()
+    def shutdown(self) -> None:
+        if self._shutting_down:
+            return
+        self._shutting_down = True
+        try:
+            self._search_timer.stop()
+        except Exception:
+            pass
+        try:
+            self._clipboard.dataChanged.disconnect(self._on_clipboard_changed)
+        except Exception:
+            pass
+        try:
+            if self._hotkey_handle is not None and keyboard:
+                keyboard.remove_hotkey(self._hotkey_handle)
+        except Exception:
+            pass
+        finally:
+            self._hotkey_handle = None
+        try:
+            self.plugin_manager.teardown()
+        except Exception:
+            pass
+        worker = self._op_worker
+        self._op_worker = None
+        if worker:
+            try:
+                if worker.isRunning():
+                    worker.requestInterruption()
+                    worker.quit()
+                    worker.wait(1500)
+            except Exception:
+                pass
+            try:
+                worker.deleteLater()
+            except Exception:
+                pass
+        try:
+            self._preview_executor.shutdown(wait=False, cancel_futures=True)
+        except TypeError:
+            self._preview_executor.shutdown(wait=False)
+        except Exception:
+            pass
 
     @Slot()
     def toggleWindow(self) -> None:
@@ -675,7 +854,7 @@ class Backend(QObject):
 
     def refresh_plugin_items(
         self, full: bool = False, clipboard_only: bool = False
-    ) -> tuple[list[ClipItem], dict[int, str]]:
+    ) -> list[ClipItem]:
         """
         Build/refresh plugin-rendered items.
         - full=True: rebuild everything (resets model).
@@ -687,22 +866,17 @@ class Backend(QObject):
             "clipboard only" if clipboard_only else "all plugins",
         )
 
-        def _build_all() -> tuple[list[ClipItem], dict[int, str]]:
+        def _build_all() -> list[ClipItem]:
             clips_all = self.plugin_manager.build_items()
-            tips_all = {
-                int(c.id): self._build_tooltip(c.content_text)
-                for c in clips_all
-                if getattr(c, "id", None) is not None
-            }
-            self.plugin_clip_model.set_clips(clips_all, subitems={}, tooltips=tips_all)
-            return clips_all, tips_all
+            self.plugin_clip_model.set_clips(clips_all, subitems={}, tooltips={})
+            return clips_all
 
         # Initial or forced full rebuild.
         if full or self.plugin_clip_model.rowCount() == 0:
-            clips, tips = _build_all()
+            clips = _build_all()
             if self._current_group_id == PLUGIN_GROUP_ID:
-                self.clip_model.set_clips(clips, subitems={}, tooltips=tips)
-            return clips, tips
+                self.clip_model.set_clips(clips, subitems={}, tooltips={})
+            return clips
 
         # Incremental refresh: update only needed plugins to avoid destroying alive WebEngineViews.
         clipboard_cache = None
@@ -729,9 +903,6 @@ class Backend(QObject):
                     getattr(item, "id", None),
                 )
                 cid = int(getattr(item, "id", -1))
-                self.plugin_clip_model._tooltips[cid] = self._build_tooltip(
-                    item.content_text
-                )
                 if self.plugin_clip_model.clip_for_id(cid):
                     self.plugin_clip_model.update_clip(item)
                     updated_items.append(item)
@@ -740,35 +911,29 @@ class Backend(QObject):
 
         # If any item was missing (new plugin etc.), fall back to full rebuild.
         if changed:
-            clips, tips = _build_all()
+            clips = _build_all()
         else:
             clips = self.plugin_clip_model._clips  # type: ignore[attr-defined]
-            tips = self.plugin_clip_model._tooltips  # type: ignore[attr-defined]
 
         # Keep legacy clip_model in sync while plugins group is active.
         if self._current_group_id == PLUGIN_GROUP_ID:
             for item in updated_items:
                 cid = int(getattr(item, "id", -1))
-                self.clip_model._tooltips[cid] = self.plugin_clip_model._tooltips.get(
-                    cid, ""
-                )
                 if self.clip_model.clip_for_id(cid):
                     self.clip_model.update_clip(item)
                 else:
                     changed = True
             if changed:
-                self.clip_model.set_clips(clips, subitems={}, tooltips=tips)
+                self.clip_model.set_clips(clips, subitems={}, tooltips={})
 
-        return clips, tips
+        return clips
 
     def _refresh_plugins(self, clipboard_only: bool = True, full: bool = False) -> None:
         """Rebuild plugin rows; defaults to updating only clipboard-driven plugins."""
-        clips, tooltips = self.refresh_plugin_items(
-            full=full, clipboard_only=clipboard_only
-        )
+        clips = self.refresh_plugin_items(full=full, clipboard_only=clipboard_only)
         if self._current_group_id == PLUGIN_GROUP_ID:
             # Keep the main clip model in sync while the Plugins tab is active.
-            self.clip_model.set_clips(clips, subitems={}, tooltips=tooltips)
+            self.clip_model.set_clips(clips, subitems={}, tooltips={})
 
     @Slot(str, str)
     def pluginAction(self, plugin_id: str, action_id: str) -> None:
@@ -792,9 +957,6 @@ class Backend(QObject):
             return
         for item in items:
             cid = int(getattr(item, "id", -1))
-            self.plugin_clip_model._tooltips[cid] = self._build_tooltip(
-                item.content_text
-            )
             if self.plugin_clip_model.clip_for_id(cid):
                 self.plugin_clip_model.update_clip(item)
             else:
@@ -808,7 +970,7 @@ class Backend(QObject):
                     self.clip_model.set_clips(
                         self.plugin_clip_model._clips,  # type: ignore[attr-defined]
                         subitems={},
-                        tooltips=self.plugin_clip_model._tooltips,  # type: ignore[attr-defined]
+                        tooltips={},
                     )
 
     def plugin_set_clipboard_and_paste(self, text: str) -> None:
@@ -824,6 +986,107 @@ class Backend(QObject):
         print("Pasting to foreground window...", text)
         QTimer.singleShot(0, self._paste_to_foreground)
         self.setWindowVisible(False)
+
+    def plugin_edit_clipboard_image(self) -> bool:
+        """Open the clipboard image in an editor and copy the edited version back."""
+        try:
+            image = self._clipboard.image()
+        except Exception:
+            image = QImage()
+        if image.isNull():
+            try:
+                mime = self._clipboard.mimeData()
+            except Exception:
+                mime = None
+            if mime and mime.hasImage():
+                try:
+                    data = mime.imageData()
+                    if isinstance(data, QImage):
+                        image = data
+                    elif hasattr(data, "toImage"):
+                        image = data.toImage()  # type: ignore[assignment]
+                except Exception:
+                    image = QImage()
+        if image.isNull():
+            try:
+                self.statusMessage.emit("Clipboard has no image to edit.")
+            except Exception:
+                pass
+            return False
+
+        tmp_dir = Path(tempfile.gettempdir()) / "cl_p"
+        try:
+            tmp_dir.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+        tmp_path = tmp_dir / f"edit_{int(time.time())}.png"
+        if not image.save(str(tmp_path), "PNG"):
+            try:
+                self.statusMessage.emit("Could not save clipboard image.")
+            except Exception:
+                pass
+            return False
+
+        try:
+            self.statusMessage.emit("Opening image editor...")
+        except Exception:
+            pass
+
+        def _worker():
+            cmd: list[str] = []
+            if sys.platform == "win32":
+                paint_path = (
+                    Path(os.environ.get("SystemRoot", "C:\\Windows"))
+                    / "System32"
+                    / "mspaint.exe"
+                )
+                if paint_path.exists():
+                    cmd = [str(paint_path), str(tmp_path)]
+            if not cmd:
+                if sys.platform == "darwin":
+                    cmd = ["open", str(tmp_path)]
+                else:
+                    cmd = ["xdg-open", str(tmp_path)]
+            try:
+                proc = subprocess.Popen(cmd)
+                proc.wait()
+            except Exception as exc:
+                print("plugin_edit_clipboard_image failed to launch editor:", exc)
+                if sys.platform == "win32":
+                    try:
+                        os.startfile(str(tmp_path))  # type: ignore[attr-defined]
+                        return
+                    except Exception as exc2:
+                        print("plugin_edit_clipboard_image fallback failed:", exc2)
+                        return
+                return
+
+            try:
+                if tmp_path.exists():
+                    edited = QImage(str(tmp_path))
+                    if not edited.isNull():
+                        self.clipboardImageEditReady.emit(edited)
+            finally:
+                try:
+                    tmp_path.unlink()
+                except Exception:
+                    pass
+
+        threading.Thread(target=_worker, daemon=True).start()
+        return True
+
+    @Slot(object)
+    def _apply_edited_clipboard_image(self, edited) -> None:
+        if self._shutting_down:
+            return
+        if not isinstance(edited, QImage) or edited.isNull():
+            return
+        self._ignore_next_clip = True
+        self._clipboard.setImage(edited)
+        try:
+            self.statusMessage.emit("Edited image copied to clipboard.")
+        except Exception:
+            pass
 
     def refresh_groups(self) -> None:
         default_id = self._get_default_group_id()
@@ -846,26 +1109,63 @@ class Backend(QObject):
         # Place Plugins before "All" to make it the first tab.
         groups = [plugin_group] + special_groups + user_groups
         self.group_model.set_groups(groups)
+        self.remaining_group_model.set_groups(groups[3:])
         self.currentGroupChanged.emit()
         if not self.storage.group_exists(self._destination_group_id):
             self._destination_group_id = self._get_default_group_id()
             self._persist_destination_group(self._destination_group_id)
         self.destinationGroupChanged.emit()
 
+    def _set_has_more_items(self, value: bool) -> None:
+        value = bool(value)
+        if self._has_more_items == value:
+            return
+        self._has_more_items = value
+        self.hasMoreItemsChanged.emit()
+
+    def _reset_visible_item_limit(self) -> None:
+        self._visible_item_limit = DEFAULT_VISIBLE_ITEM_LIMIT
+        if self._current_group_id == PLUGIN_GROUP_ID:
+            self._set_has_more_items(False)
+
+    def _uses_full_item_scan(self) -> bool:
+        return bool(
+            self._search_text
+            or self._search_regex
+            or self._search_filter != 0
+            or self._search_pin_filter != 0
+            or self._current_group_id is None
+            or self._current_group_id == PLUGIN_GROUP_ID
+        )
+
     def refresh_items(self) -> None:
         if self._current_group_id == PLUGIN_GROUP_ID and not self._plugin_initialized:
             # First entry gets a full build; later refreshes update clipboard-driven plugins only.
-            clips, tooltips = self.refresh_plugin_items(
+            print("Initializing plugin items...")
+            clips = self.refresh_plugin_items(
                 full=not self._plugin_initialized,
                 clipboard_only=self._plugin_initialized,
             )
             self._plugin_initialized = True
             # Maintain clip_model for legacy bindings while plugin list is shown.
-            self.clip_model.set_clips(clips, subitems={}, tooltips=tooltips)
+            self.clip_model.set_clips(clips, subitems={}, tooltips={})
+            self._set_has_more_items(False)
             return
-        rows = self.storage.list_items(self._current_group_id, None, previews_only=True)
+        print(f"Loading items for group {self._current_group_id}...")
+        limit = None if self._uses_full_item_scan() else self._visible_item_limit
+        rows = self.storage.list_items(
+            self._current_group_id, None, previews_only=True, limit=limit
+        )
+        print(
+            f"Loaded {len(rows)} items from storage for group {self._current_group_id}."
+        )
+        self._set_has_more_items(bool(limit is not None and len(rows) >= limit))
         clips = [item_from_row(row) for row in rows]
-        self._maybe_backfill_previews(clips)
+
+        # self._maybe_backfill_previews(clips)
+        print(
+            f"Loaded {len(clips)} items for group {self._current_group_id} before filtering."
+        )
         # optional filter by type
         if self._search_filter == 1:  # raw text
             clips = [c for c in clips if c.content_type == "text"]
@@ -907,16 +1207,67 @@ class Backend(QObject):
                     clips = [c for c in clips if txt in (c.content_text or "")]
 
         subitems = self._subitems_map(clips)
-        tooltips = {
-            int(c.id): self._build_tooltip(c.content_text)
-            for c in clips
-            if getattr(c, "id", None) is not None
-        }
-        self.clip_model.set_clips(clips, subitems=subitems, tooltips=tooltips)
+        self.clip_model.set_clips(clips, subitems=subitems, tooltips={})
         if self._pending_focus_id is not None:
             row = self.clip_model.rowForId(int(self._pending_focus_id))
             self.itemAdded.emit(int(self._pending_focus_id), int(row))
             self._pending_focus_id = None
+
+    @Slot()
+    def loadMoreItems(self) -> None:
+        if self._uses_full_item_scan():
+            self._set_has_more_items(False)
+            return
+        if self._current_group_id is None or self._current_group_id == PLUGIN_GROUP_ID:
+            self._set_has_more_items(False)
+            return
+        if not self._has_more_items:
+            return
+        self._visible_item_limit += VISIBLE_ITEM_LIMIT_STEP
+        self.refresh_items()
+
+    def _load_max_items_per_group(self) -> int:
+        raw = self.storage.get_setting("max_items_per_group")
+        try:
+            value = int(raw) if raw is not None and str(raw).strip() != "" else int(self.storage.max_items_per_group)
+        except Exception:
+            value = int(self.storage.max_items_per_group)
+        if value <= 0:
+            value = DEFAULT_MAX_STORAGE_PER_GROUP
+        try:
+            self.storage.set_max_items_per_group(value)
+        except Exception:
+            pass
+        return value
+
+    def _load_scaled_image_max_dim(self) -> int:
+        raw = self.storage.get_setting("scaled_image_max_dim")
+        try:
+            value = int(raw) if raw is not None and str(raw).strip() != "" else 300
+        except Exception:
+            value = 300
+        return max(50, value)
+
+    @Slot(int)
+    def setMaxItemsPerGroup(self, value: int) -> None:
+        normalized = int(value) if int(value) > 0 else DEFAULT_MAX_STORAGE_PER_GROUP
+        if normalized == self._max_items_per_group:
+            return
+        self._max_items_per_group = normalized
+        self.storage.set_setting("max_items_per_group", str(normalized))
+        self.storage.set_max_items_per_group(normalized)
+        self.maxItemsPerGroupChanged.emit()
+        self._reset_visible_item_limit()
+        self.refresh_items()
+
+    @Slot(int)
+    def setScaledImageMaxDim(self, value: int) -> None:
+        normalized = max(50, int(value))
+        if normalized == self._scaled_image_max_dim:
+            return
+        self._scaled_image_max_dim = normalized
+        self.storage.set_setting("scaled_image_max_dim", str(normalized))
+        self.scaledImageMaxDimChanged.emit()
 
     @Slot(int)
     def selectGroup(self, group_id: int) -> None:
@@ -935,6 +1286,7 @@ class Backend(QObject):
             except Exception:
                 pass
         self._current_group_id = new_gid
+        self._reset_visible_item_limit()
         self._persist_current_group(new_gid)
         self.currentGroupChanged.emit()
         self.refresh_items()
@@ -967,6 +1319,7 @@ class Backend(QObject):
         self._search_ignore_case = bool(ignore_case)
         self._search_filter = int(filter_type)
         self._search_pin_filter = int(pinned_filter)
+        self._reset_visible_item_limit()
         self.searchChanged.emit()
         self._search_timer.start(120)
 
@@ -1304,7 +1657,7 @@ class Backend(QObject):
         image = QImage.fromData(clip.content_blob)
         if image.isNull():
             return
-        max_dim = 300
+        max_dim = int(self._scaled_image_max_dim)
         if image.width() > max_dim or image.height() > max_dim:
             image = image.scaled(
                 max_dim, max_dim, Qt.KeepAspectRatio, Qt.SmoothTransformation
@@ -1520,11 +1873,34 @@ class Backend(QObject):
         return results
 
     def _subitems_map(self, clips: list[ClipItem]) -> dict[int, list[dict]]:
-        mapping: dict[int, list[dict]] = {}
-        for clip in clips:
-            if getattr(clip, "id", None) is None:
-                continue
-            mapping[int(clip.id)] = self._subitems_for_item(int(clip.id))
+        clip_ids = [
+            int(clip.id)
+            for clip in clips
+            if getattr(clip, "id", None) is not None and int(getattr(clip, "id", -1)) > 0
+        ]
+        if not clip_ids:
+            return {}
+        mapping: dict[int, list[dict]] = {cid: [] for cid in clip_ids}
+        try:
+            rows_by_item = self.storage.list_subitems_for_items(clip_ids)
+        except Exception:
+            rows_by_item = {}
+        for item_id, rows in rows_by_item.items():
+            results: list[dict] = []
+            for row in rows:
+                try:
+                    icons = json.loads(row["icons"] or "[]")
+                except Exception:
+                    icons = []
+                results.append(
+                    {
+                        "id": int(row["id"]),
+                        "text": str(row["text"] or ""),
+                        "tag": row["tag"] or "",
+                        "icons": icons,
+                    }
+                )
+            mapping[int(item_id)] = results
         return mapping
 
     def _on_operation_finished(self, item_id: int, task: str, text: str) -> None:
@@ -1763,6 +2139,91 @@ class Backend(QObject):
             )
         return self._image_to_bytes(image)
 
+    def _normalize_png(self, blob: Optional[bytes], max_dim: int) -> Optional[bytes]:
+        if not blob:
+            return None
+        image = QImage.fromData(blob)
+        if image.isNull():
+            return blob
+        if (
+            image.width() > max_dim
+            or image.height() > max_dim
+        ):
+            image = image.scaled(
+                max_dim,
+                max_dim,
+                Qt.KeepAspectRatio,
+                Qt.SmoothTransformation,
+            )
+        return self._image_to_bytes(image)
+
+    def _normalize_preview_png(self, blob: Optional[bytes]) -> Optional[bytes]:
+        return self._normalize_png(blob, PREVIEW_IMAGE_MAX_DIM)
+
+    def _normalize_drawio_content_png(self, blob: Optional[bytes]) -> Optional[bytes]:
+        return self._normalize_png(blob, DRAWIO_CONTENT_MAX_DIM)
+
+    def _start_image_preview_backfill(self) -> None:
+        if self._image_preview_backfill_started or self._shutting_down:
+            return
+        self._image_preview_backfill_started = True
+
+        def worker() -> None:
+            try:
+                rows = list(self.storage.list_items_missing_image_preview())
+            except Exception:
+                rows = []
+            try:
+                drawio_rows = list(self.storage.list_drawio_items_for_preview_backfill())
+            except Exception:
+                drawio_rows = []
+            changed = False
+            for row in rows:
+                if self._shutting_down:
+                    break
+                try:
+                    item_id = int(row["id"])
+                    content_type = str(row["content_type"] or "")
+                    content_text = str(row["content_text"] or "")
+                    content_blob = row["content_blob"]
+                    preview_blob = self._build_image_preview(
+                        content_type, content_text, content_blob
+                    )
+                    if preview_blob is None:
+                        continue
+                    self.storage.update_preview(item_id, None, preview_blob)
+                    changed = True
+                except Exception:
+                    continue
+            for row in drawio_rows:
+                if self._shutting_down:
+                    break
+                try:
+                    item_id = int(row["id"])
+                    payload = str(row["content_text"] or "")
+                    existing_blob = row["content_blob"] or row["preview_blob"]
+                    content_blob, preview_blob = self._drawio_png_pair_from_payload(
+                        payload, existing_blob
+                    )
+                    if content_blob is None and preview_blob is None:
+                        continue
+                    self.storage.update_content_and_preview_blobs(
+                        item_id, content_blob, preview_blob
+                    )
+                    changed = True
+                except Exception:
+                    continue
+            if changed and not self._shutting_down:
+                self.imagePreviewBackfillFinished.emit()
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    @Slot()
+    def _on_image_preview_backfill_finished(self) -> None:
+        if self._shutting_down:
+            return
+        self.refresh_items()
+
     def _schedule_preview_build(
         self,
         item_id: int,
@@ -1791,15 +2252,7 @@ class Backend(QObject):
                 preview_text, preview_blob = fut.result()
             except Exception:
                 preview_text, preview_blob = None, None
-
-            def apply() -> None:
-                self._preview_jobs.discard(int(item_id))
-                if preview_text is None and preview_blob is None:
-                    return
-                self._apply_preview_result(int(item_id), preview_text, preview_blob)
-
-            QTimer.singleShot(0, apply)
-            # apply()
+            self.previewReady.emit(int(item_id), preview_text, preview_blob)
 
         future.add_done_callback(handle_future)
 
@@ -1826,7 +2279,10 @@ class Backend(QObject):
 
     def _drawio_preview_png_bytes(self, clip: ClipItem) -> Optional[bytes]:
         payload = (clip.content_text or "").strip()
-        return self._drawio_png_from_payload(payload, clip.content_blob)
+        content_blob, _preview_blob = self._drawio_png_pair_from_payload(
+            payload, clip.content_blob
+        )
+        return content_blob
 
     def _schedule_drawio_preview(self, clip: ClipItem) -> None:
         cid = getattr(clip, "id", None)
@@ -1840,29 +2296,52 @@ class Backend(QObject):
         existing_blob = clip.content_blob
 
         def worker() -> None:
-            data = self._drawio_png_from_payload(payload, existing_blob)
-
-            def apply() -> None:
-                try:
-                    self._apply_drawio_preview(int(cid), data)
-                finally:
-                    with self._drawio_preview_lock:
-                        self._drawio_preview_jobs.discard(int(cid))
-
-            QTimer.singleShot(0, apply)
+            content_blob, preview_blob = self._drawio_png_pair_from_payload(
+                payload, existing_blob
+            )
+            self.drawioPreviewReady.emit(int(cid), content_blob, preview_blob)
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _drawio_png_from_payload(
+    @Slot(int, object, object)
+    def _on_preview_ready(
+        self, item_id: int, preview_text: Optional[str], preview_blob: Optional[bytes]
+    ) -> None:
+        self._preview_jobs.discard(int(item_id))
+        if self._shutting_down:
+            return
+        if preview_text is None and preview_blob is None:
+            return
+        self._apply_preview_result(int(item_id), preview_text, preview_blob)
+
+    @Slot(int, object, object)
+    def _on_drawio_preview_ready(
+        self,
+        clip_id: int,
+        content_blob: Optional[bytes],
+        preview_blob: Optional[bytes],
+    ) -> None:
+        try:
+            if not self._shutting_down:
+                self._apply_drawio_preview(
+                    int(clip_id), content_blob, preview_blob
+                )
+        finally:
+            with self._drawio_preview_lock:
+                self._drawio_preview_jobs.discard(int(clip_id))
+
+    def _drawio_png_pair_from_payload(
         self, payload: str, existing_blob: Optional[bytes]
-    ) -> Optional[bytes]:
+    ) -> tuple[Optional[bytes], Optional[bytes]]:
         if existing_blob:
             img = QImage.fromData(existing_blob)
             if not img.isNull():
-                return existing_blob
+                content_blob = self._normalize_drawio_content_png(existing_blob)
+                preview_blob = self._normalize_preview_png(existing_blob)
+                return content_blob, preview_blob
         clean = (payload or "").strip()
         if not clean:
-            return None
+            return None, None
 
         tmp_png: Optional[tempfile.NamedTemporaryFile] = None
         try:
@@ -1874,9 +2353,16 @@ class Backend(QObject):
 
         try:
             url_to_png(clean, output_png=str(png_path))
-            return png_path.read_bytes()
+            raw_blob = png_path.read_bytes()
+            content_blob = self._normalize_drawio_content_png(raw_blob)
+            preview_blob = self._normalize_preview_png(raw_blob)
+            return content_blob, preview_blob
         except Exception:
-            return self._drawio_placeholder_png(clean)
+            placeholder = self._drawio_placeholder_png(clean)
+            return (
+                self._normalize_drawio_content_png(placeholder),
+                self._normalize_preview_png(placeholder),
+            )
         finally:
             if tmp_png:
                 try:
@@ -1884,16 +2370,28 @@ class Backend(QObject):
                 except Exception:
                     pass
 
-    def _apply_drawio_preview(self, clip_id: int, data: Optional[bytes]) -> None:
-        if not data:
+    def _apply_drawio_preview(
+        self,
+        clip_id: int,
+        content_blob: Optional[bytes],
+        preview_blob: Optional[bytes],
+    ) -> None:
+        if not content_blob and not preview_blob:
             return
         clip = self.clip_model.clip_for_id(int(clip_id))
         if not clip:
             return
-        clip.preview_blob = data
+        if content_blob:
+            clip.content_blob = content_blob
+        if preview_blob:
+            clip.preview_blob = preview_blob
         self.clip_model.update_clip(clip)
         try:
-            self.storage.update_preview(int(clip_id), clip.preview_text, data)
+            self.storage.update_content_and_preview_blobs(
+                int(clip_id),
+                clip.content_blob,
+                clip.preview_blob,
+            )
         except Exception:
             pass
 
@@ -1965,9 +2463,6 @@ class Backend(QObject):
             return None
         full_clip = item_from_row(row)
         if clip:
-            self.clip_model._tooltips[int(full_clip.id)] = self._build_tooltip(
-                full_clip.content_text
-            )
             self.clip_model.update_clip(full_clip)
         else:
             # If clip was not present in the list (should not happen for visible items),
@@ -2021,8 +2516,10 @@ class Backend(QObject):
             if html:
                 txt = mime.text() or html
                 if is_drawio_payload(txt):
-                    png_blob = self._drawio_png_from_payload(txt, None)
-                    return "drawio", txt, png_blob
+                    content_blob, _preview_blob = self._drawio_png_pair_from_payload(
+                        txt, None
+                    )
+                    return "drawio", txt, content_blob
                 normalized_color = parse_color_text(txt)
                 if normalized_color:
                     content_type = "color"
@@ -2040,8 +2537,10 @@ class Backend(QObject):
             text = self._clipboard.text()
             if text:
                 if is_drawio_payload(text):
-                    png_blob = self._drawio_png_from_payload(text, None)
-                    return "drawio", text, png_blob
+                    content_blob, _preview_blob = self._drawio_png_pair_from_payload(
+                        text, None
+                    )
+                    return "drawio", text, content_blob
                 normalized_color = parse_color_text(text)
                 if normalized_color:
                     content_type = "color"
@@ -2109,8 +2608,10 @@ class Backend(QObject):
         if html:
             txt = text or html
             if is_drawio_payload(txt):
-                png_blob = self._drawio_png_from_payload(txt, None)
-                return "drawio", txt, png_blob, None
+                content_blob, preview_blob = self._drawio_png_pair_from_payload(
+                    txt, None
+                )
+                return "drawio", txt, content_blob, preview_blob
             normalized_color = parse_color_text(txt)
             if normalized_color:
                 # Keep original text; preview_html will be built later.
@@ -2123,8 +2624,10 @@ class Backend(QObject):
             )
         if text:
             if is_drawio_payload(text):
-                png_blob = self._drawio_png_from_payload(text, None)
-                return "drawio", text, png_blob, None
+                content_blob, preview_blob = self._drawio_png_pair_from_payload(
+                    text, None
+                )
+                return "drawio", text, content_blob, preview_blob
             normalized_color = parse_color_text(text)
             if normalized_color:
                 return "color", text, None, None
@@ -2174,6 +2677,10 @@ class Backend(QObject):
             preview_text, preview_blob = self._build_previews(
                 "html", content_text or "", content_blob
             )
+        elif content_type in ("image", "svg+xml"):
+            preview_blob = self._build_image_preview(
+                content_type or "", content_text or "", content_blob
+            )
         new_id = self.storage.add_item(
             content_type,
             content_text or "",
@@ -2194,7 +2701,11 @@ class Backend(QObject):
             except Exception:
                 pass
         self.refresh_items()
-        if content_type in ("image", "svg+xml", "drawio"):
+        if content_type == "drawio":
+            row = self.storage.get_item(int(new_id))
+            if row:
+                self._schedule_drawio_preview(item_from_row(row))
+        elif content_type in ("image", "svg+xml") and preview_blob is None:
             self._schedule_preview_build(
                 int(new_id), content_type, content_text or "", content_blob
             )
@@ -2456,4 +2967,7 @@ class Backend(QObject):
 
     def _generate_drawio_svg(self, payload: str) -> Optional[bytes]:
         """Backcompat shim: return PNG bytes instead of SVG."""
-        return self._drawio_png_from_payload(payload or "", None)
+        content_blob, _preview_blob = self._drawio_png_pair_from_payload(
+            payload or "", None
+        )
+        return content_blob

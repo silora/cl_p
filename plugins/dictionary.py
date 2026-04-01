@@ -330,7 +330,7 @@ class DictionaryPlugin(Plugin):
             if html.upper().startswith("@@@LINK="):
                 target = html.split("=", 1)[1].strip()
                 if target:
-                    return self._lookup_definition(target, depth + 1)
+                    return self._lookup_single(target, depth + 1)
             return html, None
         except Exception as exc:  # pylint: disable=broad-except
             return "", str(exc)

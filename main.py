@@ -17,7 +17,9 @@ from ui.super_rich_text_item import SuperRichTextItem
 # Avoid non-integral scale factors that WebEngine rejects; override any env drift.
 os.environ["QT_SCALE_FACTOR"] = "1.0"
 # Some GPUs/drivers emit "Compositor returned null texture" with WebEngine; prefer software compositing for stability.
-os.environ.setdefault("QTWEBENGINE_CHROMIUM_FLAGS", "--disable-gpu --disable-software-rasterizer")
+os.environ.setdefault(
+    "QTWEBENGINE_CHROMIUM_FLAGS", "--disable-gpu --disable-software-rasterizer"
+)
 
 APP_NAME = "cl_p"
 DB_NAME = "cl_p.sqlite3"
@@ -76,18 +78,27 @@ def main() -> int:
         if isinstance(app_config, dict)
         else None
     )
+
+    print("Initializing storage...")
     storage = Storage(
         db_path, max_items_per_group=int(max_items) if max_items else None
     )
+
+    print("Initializing backend...")
     backend = Backend(storage)
+    app.aboutToQuit.connect(backend.shutdown)
     app.aboutToQuit.connect(storage.close)
+
+    print("Registering QML types...")
 
     qmlRegisterType(SuperRichTextItem, "cl_p", 1, 0, "SuperRichText")
 
     engine = QQmlApplicationEngine()
     engine.rootContext().setContextProperty("backend", backend)
     engine.rootContext().setContextProperty("clipModel", backend.clip_model)
-    engine.rootContext().setContextProperty("pluginClipModel", backend.plugin_clip_model)
+    engine.rootContext().setContextProperty(
+        "pluginClipModel", backend.plugin_clip_model
+    )
     engine.rootContext().setContextProperty("groupModel", backend.group_model)
     engine.rootContext().setContextProperty("appIconPath", str(icon_path))
     engine.rootContext().setContextProperty("paletteGrays", palette.get("grays"))

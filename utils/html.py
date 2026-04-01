@@ -1,5 +1,11 @@
+import base64
 import html as _html
+import mimetypes
+import os
 import re
+import time
+import urllib.parse
+from io import BytesIO
 from pathlib import Path
 from typing import Iterable, Optional
 
@@ -80,6 +86,95 @@ def normalize_html_for_qt(
     s = re.sub(r"(?is)<\s*head\b[^>]*>.*?</\s*head\s*>", "", s)
     s = re.sub(r"(?is)<\s*br\s*/?\s*>", "<br>", s)
     s = s.replace("&#160;", "&nbsp;")
+
+    def _file_url_to_path(src: str) -> Optional[str]:
+        try:
+            parsed = urllib.parse.urlparse(src)
+        except Exception:
+            return None
+        if parsed.scheme.lower() != "file":
+            return None
+        path = urllib.parse.unquote(parsed.path or "")
+        if path.startswith("/") and re.match(r"^/[a-zA-Z]:", path):
+            path = path[1:]
+        return path or None
+
+    def _strip_white_background(data: bytes, mime: str) -> tuple[bytes, str]:
+        try:
+            from PIL import Image
+        except Exception:
+            return data, mime
+        try:
+            img = Image.open(BytesIO(data)).convert("RGBA")
+        except Exception:
+            return data, mime
+        pixels = img.getdata()
+        new_pixels = []
+        for r, g, b, a in pixels:
+            if r >= 250 and g >= 250 and b >= 250:
+                new_pixels.append((r, g, b, 0))
+            else:
+                new_pixels.append((r, g, b, a))
+        img.putdata(new_pixels)
+        bbox = img.getbbox()
+        if bbox:
+            img = img.crop(bbox)
+        out = BytesIO()
+        img.save(out, format="PNG")
+        return out.getvalue(), "image/png"
+
+    def _src_to_embedded(src: str) -> str:
+        src = (src or "").strip()
+        if src.lower().startswith("data:"):
+            return src
+        path_str: Optional[str] = None
+        if src.lower().startswith("file:"):
+            path_str = _file_url_to_path(src)
+        else:
+            p = Path(src)
+            if p.is_absolute():
+                path_str = str(p)
+            elif re.match(r"^[a-zA-Z]:", src):
+                path_str = src
+        if not path_str:
+            return src
+        if not os.path.exists(path_str):
+            for _ in range(10):
+                time.sleep(0.2)
+                if os.path.exists(path_str):
+                    break
+            else:
+                return src
+        try:
+            data = Path(path_str).read_bytes()
+        except Exception:
+            return src
+        mime, _ = mimetypes.guess_type(Path(path_str).name)
+        mime = mime or "application/octet-stream"
+        if mime.startswith("image/"):
+            data, mime = _strip_white_background(data, mime)
+        b64 = base64.b64encode(data).decode("ascii")
+        return f"data:{mime};base64,{b64}"
+
+    # Normalize legacy VML image tags to plain <img> with embedded data if local.
+    s = re.sub(
+        r'(?is)<\s*v:imagedata[^>]*\bsrc\s*=\s*([\'"])([^\'"]+)\1[^>]*>',
+        lambda m: f'<img src="{_src_to_embedded(m.group(2))}" />',
+        s,
+    )
+
+    # Embed local file-based <img> sources as data URLs.
+    def _embed_local_image(match: re.Match) -> str:
+        full_tag = match.group(0)
+        src = match.group(3)
+        embedded = _src_to_embedded(src)
+        return re.sub(r'\bsrc\s*=\s*([\'"]).*?\1', f'src="{embedded}"', full_tag)
+
+    s = re.sub(
+        r'(?is)<\s*img\b([^>]*\bsrc\s*=\s*([\'"])([^\'"]+)\2[^>]*)>',
+        _embed_local_image,
+        s,
+    )
 
     def _fix_whitespace_in_style(match: re.Match) -> str:
         style = match.group(1)

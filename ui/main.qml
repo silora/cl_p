@@ -1,9 +1,11 @@
 import QtQuick
+import QtCore
 import QtQuick.Controls
 import QtQuick.Layouts
 import QtQuick.Window
 import QtQuick.Dialogs
 import QtQuick.Shapes
+import Qt5Compat.GraphicalEffects as Effects
 import QtWebEngine
 import cl_p
 
@@ -20,6 +22,9 @@ ApplicationWindow {
     onVisibleChanged: if (visible) Qt.callLater(function() { window.raise(); window.requestActivate(); focusCatcher.forceActiveFocus(); })
 
     property bool searchBarVisible: false
+    property string pluginProfileStorageName: "clp-plugins"
+    property string pluginProfileStoragePath: StandardPaths.writableLocation(StandardPaths.AppDataLocation) + "/webengine/plugin-profile"
+    property string pluginProfileCachePath: StandardPaths.writableLocation(StandardPaths.CacheLocation) + "/webengine/plugin-profile"
 
     function focusPopup() {
         focusCatcher.forceActiveFocus()
@@ -71,12 +76,14 @@ ApplicationWindow {
     property real savedAnchorOffset: 0
     property bool pendingScrollRestore: false
     property int _restoreTries: 0
+    property bool settingsPageActive: false
 
     WebEngineProfile {
         id: pluginProfile
-        // Give the profile a stable name so WebEngine persists cookies/cache across app restarts.
-        storageName: "clp-plugins"
-        offTheRecord: false
+        // Use explicit disk-backed paths to avoid first-run profile initialization races.
+        storageName: window.pluginProfileStorageName
+        persistentStoragePath: window.pluginProfileStoragePath
+        cachePath: window.pluginProfileCachePath
         persistentCookiesPolicy: WebEngineProfile.AllowPersistentCookies
         httpCacheType: WebEngineProfile.DiskHttpCache
     }
@@ -124,10 +131,12 @@ ApplicationWindow {
     }
 
     function activeListView() {
+        if (settingsPageActive) return null
         return backend.currentGroupId === backend.pluginsGroupId ? pluginList : clipList
     }
 
     function activeModel() {
+        if (settingsPageActive) return null
         return backend.currentGroupId === backend.pluginsGroupId ? pluginClipModel : clipModel
     }
 
@@ -245,6 +254,195 @@ ApplicationWindow {
                     anchors.margins: 3
                     spacing: 4
 
+                    Row {
+                        id: fixedGroupTabs
+                        Layout.alignment: Qt.AlignVCenter
+                        spacing: 8
+
+                        Repeater {
+                            model: 3
+
+                            delegate: Item {
+                                id: fixedTabRoot
+                                property var entry: groupModel.entryAt(index)
+                                property bool hasEntry: entry && entry.id !== undefined
+                                property int gid: entry && entry.id !== undefined ? entry.id : -1
+                                property string groupName: entry && entry.name ? String(entry.name) : ""
+                                property bool isSpecial: !!(entry && entry.isSpecial)
+                                property bool isPlugin: !!(entry && entry.isPlugin)
+                                property bool checked: backend.currentGroupId === gid
+                                property bool isDestination: backend.destinationGroupId === gid
+                                property bool hovered: fixedTabHover.hovered
+                                visible: hasEntry
+                                height: groupBar.height - 6
+                                width: fixedTabPill.implicitWidth
+
+                                Rectangle {
+                                    id: fixedTabPill
+                                    anchors.fill: parent
+                                    radius: 8
+                                    implicitWidth: fixedTabRoot.isSpecial
+                                                   ? height
+                                                   : Math.max(56, fixedTabLabel.implicitWidth + 24)
+                                    color: fixedTabRoot.isDestination
+                                           ? ((fixedTabRoot.checked || fixedTabRoot.hovered)
+                                              ? highlightColors[0]
+                                              : mixColor(highlightColors[0], grays[0]))
+                                           : ((fixedTabRoot.checked || fixedTabRoot.hovered) ? grays[0] : grays[2])
+                                    border.width: fixedTabRoot.checked ? 3 : 0
+                                    border.color: grays[3]
+                                }
+
+                                RowLayout {
+                                    anchors.fill: parent
+                                    anchors.leftMargin: fixedTabRoot.isSpecial ? 6 : 12
+                                    anchors.rightMargin: fixedTabRoot.isSpecial ? 6 : 8
+                                    spacing: fixedTabRoot.isSpecial ? 6 : 4
+
+                                    Image {
+                                        visible: fixedTabRoot.isSpecial
+                                        source: fixedTabRoot.isPlugin ? iconsRoot + "icon_colored.png"
+                                                : (fixedTabRoot.gid < 0 ? iconsRoot + "icon_full.png" : iconsRoot + "icon.png")
+                                        sourceSize.width: 24
+                                        sourceSize.height: 24
+                                        width: 18
+                                        height: 18
+                                        fillMode: Image.PreserveAspectFit
+                                        Layout.alignment: Qt.AlignHCenter | Qt.AlignVCenter
+
+                                        ToolTip {
+                                            visible: fixedTabRoot.hovered && fixedTabRoot.isSpecial
+                                            text: fixedTabRoot.isPlugin
+                                                  ? qsTr("Plugins")
+                                                  : (fixedTabRoot.gid < 0 ? qsTr("All Clips") : qsTr("Default Group"))
+                                            background: Rectangle {
+                                                radius: 10
+                                                color: grays[1]
+                                                border.color: grays[3]
+                                                border.width: 1
+                                            }
+                                        }
+                                    }
+
+                                    Label {
+                                        id: fixedTabLabel
+                                        text: fixedTabRoot.groupName
+                                        color: grays[8]
+                                        font.pixelSize: 18
+                                        font.weight: fixedTabRoot.checked ? Font.DemiBold : Font.Medium
+                                        elide: Text.ElideRight
+                                        visible: !fixedTabRoot.isSpecial && !fixedTabRoot.isPlugin
+                                        Layout.alignment: Qt.AlignVCenter
+                                    }
+                                }
+
+                                HoverHandler {
+                                    id: fixedTabHover
+                                }
+
+                                TapHandler {
+                                    acceptedButtons: Qt.LeftButton
+                                    onTapped: {
+                                        window.settingsPageActive = false
+                                        backend.selectGroup(fixedTabRoot.gid)
+                                    }
+                                    onDoubleTapped: backend.setDestinationGroup(fixedTabRoot.gid)
+                                }
+
+                                TapHandler {
+                                    acceptedButtons: Qt.RightButton
+                                    gesturePolicy: TapHandler.ReleaseWithinBounds
+                                    onTapped: function(ev) {
+                                        if (fixedTabRoot.gid < 0) return
+                                        var canSend = fixedTabRoot.gid !== backend.destinationGroupId
+                                        var canEdit = !fixedTabRoot.isSpecial
+                                        if (!(canSend || canEdit)) return
+                                        var pos = ev && ev.position ? ev.position : Qt.point(0, 0)
+                                        var p = fixedTabRoot.mapToItem(Overlay.overlay, pos.x, pos.y)
+                                        fixedGroupTabMenu.x = p.x
+                                        fixedGroupTabMenu.y = p.y
+                                        fixedGroupTabMenu.open()
+                                    }
+                                }
+
+                                Menu {
+                                    id: fixedGroupTabMenu
+                                    parent: window.contentItem
+                                    Component.onCompleted: {
+                                        if (Overlay.overlay) parent = Overlay.overlay
+                                        close()
+                                    }
+                                    padding: 2
+                                    implicitWidth: 110
+                                    modal: false
+                                    closePolicy: Popup.CloseOnPressOutside | Popup.CloseOnEscape
+
+                                    background: Rectangle {
+                                        radius: 10
+                                        color: grays[0]
+                                        border.color: grays[3]
+                                        border.width: 2
+                                    }
+
+                                    component FixedGroupMenuItem: MenuItem {
+                                        id: fgmi
+                                        height: visible ? implicitHeight : 0
+                                        hoverEnabled: true
+                                        font.pixelSize: 14
+                                        leftPadding: 10
+                                        rightPadding: 10
+                                        topPadding: 4
+                                        bottomPadding: 4
+                                        padding: 0
+                                        background: Rectangle {
+                                            anchors.fill: parent
+                                            radius: 8
+                                            color: fgmi.hovered ? grays[2] : "transparent"
+                                            border.width: 0
+                                        }
+                                        contentItem: Label {
+                                            text: fgmi.text
+                                            color: grays[8]
+                                            font.pixelSize: fgmi.font.pixelSize
+                                            elide: Text.ElideRight
+                                            verticalAlignment: Text.AlignVCenter
+                                        }
+                                    }
+
+                                    FixedGroupMenuItem {
+                                        visible: fixedTabRoot.gid !== backend.destinationGroupId
+                                        text: qsTr("Send here")
+                                        enabled: fixedTabRoot.gid >= 0
+                                        onTriggered: backend.setDestinationGroup(fixedTabRoot.gid)
+                                    }
+
+                                    FixedGroupMenuItem {
+                                        text: qsTr("Rename")
+                                        visible: !fixedTabRoot.isSpecial
+                                        onTriggered: groupDialog.openForRename(fixedTabRoot.gid, fixedTabRoot.groupName)
+                                    }
+
+                                    FixedGroupMenuItem {
+                                        text: qsTr("Delete")
+                                        visible: !fixedTabRoot.isSpecial
+                                        onTriggered: confirmDeleteGroup(fixedTabRoot.gid, fixedTabRoot.groupName)
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    Rectangle {
+                        Layout.alignment: Qt.AlignVCenter
+                        Layout.leftMargin: 8
+                        Layout.rightMargin: 8
+                        Layout.preferredWidth: 2
+                        Layout.preferredHeight: Math.max(24, groupBar.height - 14)
+                        color: grays[3]
+                        opacity: 0.9
+                        radius: 1
+                    }
+
                     ListView {
                         id: groupList
                         Layout.fillWidth: true
@@ -255,7 +453,7 @@ ApplicationWindow {
                         clip: true
                         boundsBehavior: Flickable.StopAtBounds
 
-                        model: groupModel
+                        model: backend.remainingGroupModel
                         flickDeceleration: 5000
                         maximumFlickVelocity: 20000
                         ScrollBar.horizontal: ScrollBar {
@@ -268,8 +466,6 @@ ApplicationWindow {
                             width: tabPill.implicitWidth
 
                             property int gid: model.id
-                            property bool isSpecial: model.isSpecial
-                            property bool isPlugin: model.isPlugin
                             property bool checked: backend.currentGroupId === gid
                             property bool isDestination: backend.destinationGroupId === gid
                             property bool hovered: false
@@ -292,10 +488,7 @@ ApplicationWindow {
                                 var p = tabRoot.mapToItem(groupList.contentItem, pLocal.x, pLocal.y)
                                 var idx = groupList.indexAt(p.x, groupList.height / 2)
                                 if (idx < 0 && p.x > 0) idx = total - 1
-                                if (idx < 0 && p.x <= 0) idx = 2
-                                var specialCount = (groupModel && groupModel.specialCount) ? groupModel.specialCount() : 2
-                                var minUser = total > specialCount ? specialCount : Math.max(0, total - 1)
-                                if (idx < minUser) idx = minUser
+                                if (idx < 0 && p.x <= 0) idx = 0
                                 if (idx > total - 1) idx = total - 1
                                 return idx
                             }
@@ -306,9 +499,7 @@ ApplicationWindow {
                                     height: parent.height - 2
                                     radius: 8
 
-                                    implicitWidth: tabRoot.isSpecial
-                                               ? height
-                                               : Math.max(56, (label.visible ? label.implicitWidth : 0) + (tabIcon.visible ? tabIcon.width + 8 : 0) + 24)
+                                    implicitWidth: Math.max(56, label.implicitWidth + 24)
 
                                     color: (tabRoot.isDestination ? ((tabRoot.checked || tabRoot.hovered) ? highlightColors[0] : mixColor(highlightColors[0], grays[0])) : ((tabRoot.checked || tabRoot.hovered) ? grays[0] : grays[2]))
                                     border.width: tabRoot.checked ? 3 : 0
@@ -317,29 +508,9 @@ ApplicationWindow {
                                 RowLayout {
                                     id: tabRow
                                     anchors.fill: parent
-                                    anchors.leftMargin: tabRoot.isSpecial ? 6 : 12
-                                    anchors.rightMargin: tabRoot.isSpecial ? 6 : 8
-                                    spacing: tabRoot.isSpecial ? 6 : 4
-
-                                    Image {
-                                        id: tabIcon
-                                        visible: tabRoot.isSpecial
-                                        source: tabRoot.isPlugin ? iconsRoot + "icon_colored.png"
-                                                : (tabRoot.gid < 0 ? iconsRoot + "icon_full.png" : iconsRoot + "icon.png")
-                                        sourceSize.width: 24
-                                        sourceSize.height: 24
-                                        width: 18
-                                        height: 18
-                                        fillMode: Image.PreserveAspectFit
-                                        Layout.alignment: Qt.AlignHCenter | Qt.AlignVCenter
-                                        Layout.fillWidth: false
-                                        ToolTip.visible: hovered && tabRoot.isSpecial
-                                        ToolTip.text: tabRoot.isSpecial
-                                                      ? (tabRoot.isPlugin
-                                                         ? qsTr("Plugins")
-                                                         : (tabRoot.gid < 0 ? qsTr("All Clips") : qsTr("Default Group")))
-                                                      : ""
-                                    }
+                                    anchors.leftMargin: 12
+                                    anchors.rightMargin: 8
+                                    spacing: 4
 
                                     Label {
                                         id: label
@@ -348,7 +519,6 @@ ApplicationWindow {
                                         font.pixelSize: 18
                                         font.weight: tabRoot.checked ? Font.DemiBold : Font.Medium
                                         elide: Text.ElideRight
-                                        visible: !tabRoot.isSpecial && !tabRoot.isPlugin
                                         Layout.alignment: Qt.AlignVCenter
                                         Layout.maximumWidth: 220
                                         Layout.preferredWidth: visible ? implicitWidth : 0
@@ -358,7 +528,7 @@ ApplicationWindow {
 
                                 DragHandler {
                                     id: dragGroup
-                                    enabled: !tabRoot.isSpecial
+                                    enabled: true
                                     xAxis.enabled: true
                                     yAxis.enabled: false
                                     target: null
@@ -374,8 +544,8 @@ ApplicationWindow {
                                             } else if (targetIndex < 0 || targetIndex >= total) {
                                                 console.log("group drag release ignored (target out of range)", "target", targetIndex, "total", total)
                                             } else if (targetIndex !== index) {
-                                                console.log("group drag release reorder", "from", index, "to", targetIndex, "total", total)
-                                                backend.reorderGroups(index, targetIndex)
+                                                console.log("group drag release reorder", "from", index + 3, "to", targetIndex + 3, "total", total)
+                                                backend.reorderGroups(index + 3, targetIndex + 3)
                                             } else {
                                                 console.log("group drag no reorder", "index", index, "target", targetIndex)
                                             }
@@ -393,7 +563,10 @@ ApplicationWindow {
 
                                 TapHandler {
                                     acceptedButtons: Qt.LeftButton
-                                    onTapped: backend.selectGroup(tabRoot.gid)
+                                    onTapped: {
+                                        window.settingsPageActive = false
+                                        backend.selectGroup(tabRoot.gid)
+                                    }
                                     onDoubleTapped: backend.setDestinationGroup(tabRoot.gid)
                                 }
 
@@ -403,7 +576,7 @@ ApplicationWindow {
                                     onTapped: function(ev) {
                                         if (tabRoot.gid < 0) return
                                         var canSend = tabRoot.gid !== backend.destinationGroupId
-                                        var canEdit = !tabRoot.isSpecial
+                                        var canEdit = true
                                         if (!(canSend || canEdit)) return
                                         var pos = ev && ev.position ? ev.position : Qt.point(0, 0)
                                         var p = tabRoot.mapToItem(Overlay.overlay, pos.x, pos.y)
@@ -477,21 +650,33 @@ ApplicationWindow {
                                 GroupMenuItem {
                                     id: renameGroupItem
                                     text: qsTr("Rename")
-                                    visible: !tabRoot.isSpecial
+                                    visible: true
                                     onTriggered: groupDialog.openForRename(tabRoot.gid, model.name)
                                 }
                                 GroupMenuItem {
                                     id: deleteGroupItem
                                     text: qsTr("Delete")
-                                    visible: !tabRoot.isSpecial
+                                    visible: true
                                     onTriggered: confirmDeleteGroup(tabRoot.gid, model.name)
                                 }
                             }
                         }
                     }
 
+                    Rectangle {
+                        Layout.alignment: Qt.AlignVCenter
+                        Layout.leftMargin: 8
+                        Layout.rightMargin: 8
+                        Layout.preferredWidth: 2
+                        Layout.preferredHeight: Math.max(24, groupBar.height - 14)
+                        color: grays[3]
+                        opacity: 0.9
+                        radius: 1
+                    }
+
                     ToolButton {
                         id: addGroupBtn
+                        Layout.alignment: Qt.AlignVCenter
                         focusPolicy: Qt.NoFocus
                         hoverEnabled: true
 
@@ -514,6 +699,76 @@ ApplicationWindow {
 
                         onClicked: groupDialog.openForCreate()
                     }
+
+                    Item {
+                        id: settingsTabButton
+                        Layout.preferredWidth: 38
+                        Layout.alignment: Qt.AlignVCenter
+                        Layout.fillHeight: true
+                        implicitHeight: groupList.height
+
+                        property bool hovered: settingsHover.hovered
+
+                        Rectangle {
+                            id: settingsTabPill
+                            anchors.verticalCenter: parent.verticalCenter
+                            height: parent.height - 2
+                            radius: 8
+                            width: 38
+                            color: (window.settingsPageActive || settingsTabButton.hovered) ? grays[0] : grays[2]
+                            border.color: grays[3]
+                            border.width: window.settingsPageActive ? 3 : 0
+                        }
+
+                        Image {
+                            id: settingsIcon
+                            anchors.centerIn: parent
+                            source: iconsRoot + "setting.png"
+                            width: 20
+                            height: 20
+                            sourceSize.width: 20
+                            sourceSize.height: 20
+                            fillMode: Image.PreserveAspectFit
+                            opacity: 0.0
+                        }
+
+                        Rectangle {
+                            anchors.centerIn: parent
+                            width: 20
+                            height: 20
+                            color: grays[8]
+
+                            layer.enabled: true
+                            layer.samplerName: "source"
+                            layer.effect: Effects.OpacityMask {
+                                maskSource: settingsIcon
+                            }
+                        }
+
+                        HoverHandler {
+                            id: settingsHover
+                        }
+
+                        ToolTip {
+                            visible: settingsTabButton.hovered
+                            text: qsTr("Open settings")
+                            background: Rectangle {
+                                radius: 10
+                                color: grays[1]
+                                border.color: grays[3]
+                                border.width: 1
+                            }
+                        }
+
+                        TapHandler {
+                            acceptedButtons: Qt.LeftButton
+                            onTapped: {
+                                window.settingsPageActive = true
+                                maxItemsField.text = String(backend.maxItemsPerGroup)
+                                scaledImageField.text = String(backend.scaledImageMaxDim)
+                            }
+                        }
+                    }
                 }
             }
 
@@ -522,7 +777,7 @@ ApplicationWindow {
             // ===========================
             ToolBar {
                 id: headerBar
-                visible: window.searchBarVisible
+                visible: window.searchBarVisible && !window.settingsPageActive
                 Layout.fillWidth: true
                 Layout.preferredHeight: 30
                 background: Rectangle { 
@@ -603,10 +858,18 @@ ApplicationWindow {
                                 border.color: grays[3]
                                 border.width: 2
                             }
-                            ToolTip.visible: hovered
-                            ToolTip.text: searchRow.pinFilterMode === 0
-                                           ? qsTr("All clips")
-                                           : (searchRow.pinFilterMode === 1 ? qsTr("Pinned only") : qsTr("Unpinned only"))
+                            ToolTip {
+                                visible: pinFilterToggle.hovered
+                                text: searchRow.pinFilterMode === 0
+                                      ? qsTr("All clips")
+                                      : (searchRow.pinFilterMode === 1 ? qsTr("Pinned only") : qsTr("Unpinned only"))
+                                background: Rectangle {
+                                    radius: 10
+                                    color: grays[1]
+                                    border.color: grays[3]
+                                    border.width: 1
+                                }
+                            }
                             onClicked: {
                                 searchRow.pinFilterMode = (searchRow.pinFilterMode + 1) % 3
                                 searchDebounce.restart()
@@ -707,8 +970,8 @@ ApplicationWindow {
                 radius: 12
                 color: grays[1]
                 gradient: Gradient {
-                    GradientStop { position: 0.0; color: backend.pluginsGroupId === backend.currentGroupId ? mixColor(highlightColors[0], grays[1]) : grays[1] }
-                    GradientStop { position: 1.0; color: backend.pluginsGroupId === backend.currentGroupId ? mixColor(highlightColors[2], grays[3]) : grays[3] }
+                    GradientStop { position: 0.0; color: window.settingsPageActive ? grays[1] : (backend.pluginsGroupId === backend.currentGroupId ? mixColor(highlightColors[0], grays[1]) : grays[1]) }
+                    GradientStop { position: 1.0; color: window.settingsPageActive ? grays[3] : (backend.pluginsGroupId === backend.currentGroupId ? mixColor(highlightColors[2], grays[3]) : grays[3]) }
                 }
                 border.color: "transparent"
                 Layout.fillWidth: true
@@ -718,7 +981,7 @@ ApplicationWindow {
                     id: clipList
                     anchors.fill: parent
                     anchors.margins: 8
-                    property bool active: backend.currentGroupId !== backend.pluginsGroupId
+                    property bool active: !window.settingsPageActive && backend.currentGroupId !== backend.pluginsGroupId
                     opacity: active ? 1 : 0
                     enabled: active
                     visible: active
@@ -732,8 +995,13 @@ ApplicationWindow {
                     clip: true
                     maximumFlickVelocity: 5000
                     flickDeceleration: 1500
-                    // Preload more delegates offscreen to reduce visible popping during fast scroll.
-                    cacheBuffer: Math.max(0, height * 3)
+                    // Keep the offscreen cache modest; very large buffers get expensive with rich delegates.
+                    cacheBuffer: Math.max(0, height)
+                    onContentYChanged: {
+                        if (backend.hasMoreItems && (contentY + height) >= (contentHeight - 800)) {
+                            backend.loadMoreItems()
+                        }
+                    }
                     onContentHeightChanged: window.restoreScrollWhenStable()
                     onCountChanged: {
                         if (currentIndex >= count) {
@@ -750,6 +1018,19 @@ ApplicationWindow {
                         anchors.rightMargin: 0
                         anchors.top: parent.top
                         anchors.bottom: parent.bottom
+                    }
+
+                    footer: Item {
+                        width: clipList.width
+                        height: backend.hasMoreItems ? 36 : 0
+                        visible: backend.hasMoreItems
+
+                        Text {
+                            anchors.centerIn: parent
+                            text: qsTr("Loading more...")
+                            color: grays[4]
+                            font.pixelSize: 12
+                        }
                     }
 
                     Connections {
@@ -792,8 +1073,8 @@ ApplicationWindow {
                         property int clipContentLength: model.contentLength
                         property string clipBaseColor: model.baseColor
                         property string clipLabel: model.label
-                        property string clipTooltip: model.tooltip
                         property string previewSource: model.preview
+                        property string fullPreviewSource: model.fullPreview
                         property string clipRenderMode: model.renderMode
                         property string clipPluginId: model.pluginId
                         property var clipExtraActions: model.extraActions || []
@@ -804,7 +1085,9 @@ ApplicationWindow {
                         property bool longByLength: clipContentLength > 400
 
                         onExpandedChanged: {
-                            if (delegateRoot.expanded && !delegateRoot.clipHasFull) {
+                            if (delegateRoot.expanded
+                                    && delegateRoot.clipContentType !== "drawio"
+                                    && !delegateRoot.clipHasFull) {
                                 backend.loadItemContent(delegateRoot.clipId)
                             }
                         }
@@ -878,7 +1161,9 @@ ApplicationWindow {
                                 delegateRoot.gs75Pos = 0.75
                             }
                         }
-                        onIsHoveredChanged: requestGradientUpdate()
+                        onIsHoveredChanged: {
+                            requestGradientUpdate()
+                        }
                         onClipBaseColorChanged: requestGradientUpdate()
                         Component.onCompleted: applyGradientStops()
 
@@ -1192,8 +1477,13 @@ ApplicationWindow {
                                                         id: img
                                                         anchors.horizontalCenter: parent.horizontalCenter
                                                         anchors.verticalCenter: parent.verticalCenter
-                                                        source: delegateRoot.isImageContent && delegateRoot.previewSource !== ""
-                                                            ? delegateRoot.previewSource
+                                                        source: delegateRoot.isImageContent
+                                                            ? ((delegateRoot.expanded
+                                                                && delegateRoot.fullPreviewSource !== "")
+                                                                ? delegateRoot.fullPreviewSource
+                                                                : (delegateRoot.previewSource !== ""
+                                                                    ? delegateRoot.previewSource
+                                                                    : ""))
                                                             : ""
                                                         fillMode: Image.PreserveAspectFit
                                                         asynchronous: true
@@ -1256,8 +1546,8 @@ ApplicationWindow {
                                                     contextMenu.y = p.y
                                                     contextMenu.popup()
                                                     mouse.accepted = true
-                                                    clipList.currentIndex = index
-                                                    clipList.rootWindow.selectedClipId = delegateRoot.clipId
+                                                    delegateRoot.clipList.currentIndex = index
+                                                    delegateRoot.clipList.rootWindow.selectedClipId = delegateRoot.clipId
                                                     return
                                                 }
                                                 if (isPluginWeb) {
@@ -1273,16 +1563,16 @@ ApplicationWindow {
                                                     mouse.accepted = false
                                                     return
                                                 }
-                                                clipList.currentIndex = index
-                                                clipList.rootWindow.selectedClipId = delegateRoot.clipId
+                                                delegateRoot.clipList.currentIndex = index
+                                                delegateRoot.clipList.rootWindow.selectedClipId = delegateRoot.clipId
                                             }
                                             onDoubleClicked: function(mouse) {
                                                 if (delegateRoot.isPluginItem && delegateRoot.clipRenderMode === "web") {
                                                     mouse.accepted = false
                                                     return
                                                 }
-                                                clipList.currentIndex = index
-                                                clipList.rootWindow.selectedClipId = delegateRoot.clipId
+                                                delegateRoot.clipList.currentIndex = index
+                                                delegateRoot.clipList.rootWindow.selectedClipId = delegateRoot.clipId
                                                 var t = delegateRoot.clipContentText || ""
                                                 // var isUrl = /^\s*(https?:\/\/|www\.)/i.test(t)
                                                 // if (isUrl) {
@@ -1290,16 +1580,16 @@ ApplicationWindow {
                                                 //     return
                                                 // }
                                                 backend.activateItem(delegateRoot.clipId, true)
-                                                clipList.rootWindow.visible = false
+                                                delegateRoot.clipList.rootWindow.visible = false
                                             }
                                             onPressAndHold: {
-                                                clipList.currentIndex = index
-                                                clipList.rootWindow.selectedClipId = delegateRoot.clipId
+                                                delegateRoot.clipList.currentIndex = index
+                                                delegateRoot.clipList.rootWindow.selectedClipId = delegateRoot.clipId
                                                 var canExpand = delegateRoot.isImageContent || delegateRoot.richIsLong
                                                 if (!canExpand) return
                                                 delegateRoot.longPressActive = true
                                                 delegateRoot.expanded = true
-                                                clipList.dragLocked = true
+                                                delegateRoot.clipList.dragLocked = true
                                                 if (delegateRoot.isTextContent) {
                                                     delegateRoot.longPressHoverPan = true
                                                     rich.feedPointer(Qt.point(mouseX, mouseY))
@@ -1312,7 +1602,7 @@ ApplicationWindow {
                                                 }
                                             }
                                             onWheel: function(wheel) {
-                                                clipList.dragLocked = false
+                                                delegateRoot.clipList.dragLocked = false
                                                 wheel.accepted = false
                                             }
                                             onReleased: delegateRoot.endLongPress()
@@ -1417,20 +1707,29 @@ ApplicationWindow {
                                                 }
 
                                                 MouseArea {
+                                                    id: subitemMouseArea
                                                     anchors.fill: subitemCard
                                                     hoverEnabled: true
                                                     cursorShape: Qt.PointingHandCursor
                                                     acceptedButtons: Qt.LeftButton | Qt.RightButton
-                                                    ToolTip.visible: containsMouse
-                                                    ToolTip.delay: 700
-                                                    ToolTip.text: modelData && modelData.text ? "[" + String(modelData.tag) + "] " + String(modelData.text) : ""
+                                                    ToolTip {
+                                                        visible: subitemMouseArea.containsMouse
+                                                        delay: 700
+                                                        text: modelData && modelData.text ? "[" + String(modelData.tag) + "] " + String(modelData.text) : ""
+                                                        background: Rectangle {
+                                                            radius: 10
+                                                            color: grays[1]
+                                                            border.color: grays[3]
+                                                            border.width: 1
+                                                        }
+                                                    }
                                                     onDoubleClicked: {
                                                         var t = modelData && modelData.text ? String(modelData.text) : ""
                                                         var tag = modelData && modelData.tag ? String(modelData.tag).toLowerCase() : ""
                                                         if (!t) return
                                                         if (tag === "file") {
                                                             backend.openFilePath(t)
-                                                            clipList.rootWindow.visible = false
+                                                            delegateRoot.clipList.rootWindow.visible = false
                                                             return
                                                         }
                                                         var isUrl = /^\s*(https?:\/\/|www\.)/i.test(t)
@@ -1439,7 +1738,7 @@ ApplicationWindow {
                                                             return
                                                         }
                                                         backend.activateSubitem(delegateRoot.clipId, t, true)
-                                                        clipList.rootWindow.visible = false
+                                                        delegateRoot.clipList.rootWindow.visible = false
                                                     }
                                                     onPressAndHold: function(mouse) {
                                                         var t2 = modelData && modelData.text ? String(modelData.text) : ""
@@ -1952,7 +2251,15 @@ ApplicationWindow {
                                             text: ""
                                             icon.source: iconsRoot + modelData.icon
                                             icon.color: "transparent"
-                                            ToolTip.text: modelData.label
+                                            ToolTip {
+                                                text: modelData.label
+                                                background: Rectangle {
+                                                    radius: 10
+                                                    color: grays[1]
+                                                    border.color: grays[3]
+                                                    border.width: 1
+                                                }
+                                            }
                                             background: Rectangle {
                                                 radius: 10
                                                 color: hovered ? (modelData.hover || modelData.normal || "#ddcccccc") : (modelData.normal || "#cccccccc")
@@ -1977,7 +2284,7 @@ ApplicationWindow {
                     id: pluginList
                     anchors.fill: parent
                     anchors.margins: 8
-                    property bool active: backend.currentGroupId === backend.pluginsGroupId
+                    property bool active: !window.settingsPageActive && backend.currentGroupId === backend.pluginsGroupId
                     opacity: active ? 1 : 0
                     enabled: active
                     z: active ? 1 : 0
@@ -2077,6 +2384,221 @@ ApplicationWindow {
                     delegate: clipList.delegate
 
                     onCurrentIndexChanged: if (visible) window.selectedClipId = pluginClipModel.idAt(currentIndex)
+                }
+
+                Flickable {
+                    id: settingsPage
+                    anchors.fill: parent
+                    anchors.margins: 8
+                    visible: window.settingsPageActive
+                    enabled: visible
+                    clip: true
+                    contentWidth: width
+                    contentHeight: settingsColumn.implicitHeight + 24
+
+                    ColumnLayout {
+                        id: settingsColumn
+                        x: 0
+                        y: 0
+                        width: settingsPage.width
+                        spacing: 14
+
+                        Rectangle {
+                            Layout.fillWidth: true
+                            implicitHeight: settingsIntroContent.implicitHeight + 36
+                            radius: 12
+                            color: addAlphaToColor(grays[0], 0.45)
+                            border.color: grays[3]
+                            border.width: 2
+
+                            ColumnLayout {
+                                id: settingsIntroContent
+                                anchors.fill: parent
+                                anchors.margins: 18
+                                spacing: 14
+
+                                Label {
+                                    text: qsTr("Settings")
+                                    color: grays[8]
+                                    font.pixelSize: 24
+                                    font.weight: Font.DemiBold
+                                }
+
+                                Label {
+                                    Layout.fillWidth: true
+                                    wrapMode: Text.Wrap
+                                    text: qsTr("Adjust list limits and scaled-image behavior here. Changes are saved to the local database.")
+                                    color: grays[6]
+                                    font.pixelSize: 14
+                                }
+                            }
+                        }
+
+                        Rectangle {
+                            Layout.fillWidth: true
+                            implicitHeight: settingsMaxItemsContent.implicitHeight + 36
+                            radius: 12
+                            color: addAlphaToColor(grays[0], 0.35)
+                            border.color: grays[3]
+                            border.width: 2
+
+                            ColumnLayout {
+                                id: settingsMaxItemsContent
+                                anchors.fill: parent
+                                anchors.margins: 18
+                                spacing: 10
+
+                                Label {
+                                    text: qsTr("Max items per group")
+                                    color: grays[8]
+                                    font.pixelSize: 18
+                                    font.weight: Font.Medium
+                                }
+
+                                Label {
+                                    Layout.fillWidth: true
+                                    wrapMode: Text.Wrap
+                                    text: qsTr("When a group exceeds this count, older items are pruned.")
+                                    color: grays[6]
+                                    font.pixelSize: 13
+                                }
+
+                                TextField {
+                                    id: maxItemsField
+                                    Layout.fillWidth: true
+                                    Layout.preferredHeight: 40
+                                    placeholderText: qsTr("e.g. 300")
+                                    selectByMouse: true
+                                    font.pixelSize: 15
+                                    color: grays[8]
+                                    validator: IntValidator { bottom: 1; top: 999999 }
+                                    background: Rectangle {
+                                        radius: 10
+                                        color: grays[1]
+                                        border.color: grays[3]
+                                        border.width: 2
+                                    }
+                                }
+                            }
+                        }
+
+                        Rectangle {
+                            Layout.fillWidth: true
+                            implicitHeight: settingsScaledImageContent.implicitHeight + 36
+                            radius: 12
+                            color: addAlphaToColor(grays[0], 0.35)
+                            border.color: grays[3]
+                            border.width: 2
+
+                            ColumnLayout {
+                                id: settingsScaledImageContent
+                                anchors.fill: parent
+                                anchors.margins: 18
+                                spacing: 10
+
+                                Label {
+                                    text: qsTr("Paste-as-scaled-image max size")
+                                    color: grays[8]
+                                    font.pixelSize: 18
+                                    font.weight: Font.Medium
+                                }
+
+                                Label {
+                                    Layout.fillWidth: true
+                                    wrapMode: Text.Wrap
+                                    text: qsTr("Upper bound in pixels used by the scaled-image paste operation.")
+                                    color: grays[6]
+                                    font.pixelSize: 13
+                                }
+
+                                TextField {
+                                    id: scaledImageField
+                                    Layout.fillWidth: true
+                                    Layout.preferredHeight: 40
+                                    placeholderText: qsTr("e.g. 300")
+                                    selectByMouse: true
+                                    font.pixelSize: 15
+                                    color: grays[8]
+                                    validator: IntValidator { bottom: 50; top: 999999 }
+                                    background: Rectangle {
+                                        radius: 10
+                                        color: grays[1]
+                                        border.color: grays[3]
+                                        border.width: 2
+                                    }
+                                }
+                            }
+                        }
+
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: 10
+
+                            Item { Layout.fillWidth: true }
+
+                            Button {
+                                id: settingsResetButton
+                                text: qsTr("Reset")
+                                hoverEnabled: true
+                                font.pixelSize: 14
+                                Layout.preferredWidth: 120
+                                contentItem: Label {
+                                    text: settingsResetButton.text
+                                    color: grays[8]
+                                    font.pixelSize: settingsResetButton.font.pixelSize
+                                    font.weight: Font.Medium
+                                    horizontalAlignment: Text.AlignHCenter
+                                    verticalAlignment: Text.AlignVCenter
+                                }
+                                background: Rectangle {
+                                    radius: 10
+                                    color: settingsResetButton.pressed
+                                           ? grays[2]
+                                           : (settingsResetButton.hovered ? grays[1] : grays[0])
+                                    border.color: settingsResetButton.hovered ? grays[4] : grays[3]
+                                    border.width: 2
+                                }
+                                onClicked: {
+                                    maxItemsField.text = String(backend.maxItemsPerGroup)
+                                    scaledImageField.text = String(backend.scaledImageMaxDim)
+                                    statusText.text = qsTr("Settings reset to current saved values.")
+                                    statusClearTimer.restart()
+                                }
+                            }
+
+                            Button {
+                                id: settingsSaveButton
+                                text: qsTr("Save")
+                                hoverEnabled: true
+                                font.pixelSize: 14
+                                Layout.preferredWidth: 120
+                                contentItem: Label {
+                                    text: settingsSaveButton.text
+                                    color: grays[8]
+                                    font.pixelSize: settingsSaveButton.font.pixelSize
+                                    font.weight: Font.DemiBold
+                                    horizontalAlignment: Text.AlignHCenter
+                                    verticalAlignment: Text.AlignVCenter
+                                }
+                                background: Rectangle {
+                                    radius: 10
+                                    color: settingsSaveButton.pressed
+                                           ? highlightColors[0]
+                                           : (settingsSaveButton.hovered ? highlightColors[2] : grays[2])
+                                    border.color: settingsSaveButton.hovered ? highlightColors[2] : grays[3]
+                                    border.width: 2
+                                }
+                                onClicked: {
+                                    var maxItems = parseInt(maxItemsField.text)
+                                    var scaledDim = parseInt(scaledImageField.text)
+                                    if (!isNaN(maxItems) && maxItems > 0) backend.setMaxItemsPerGroup(maxItems)
+                                    if (!isNaN(scaledDim) && scaledDim >= 50) backend.setScaledImageMaxDim(scaledDim)
+                                    statusText.text = qsTr("Settings saved.")
+                                    statusClearTimer.restart()
+                                }
+                            }
+                        }
+                    }
                 }
             }
 

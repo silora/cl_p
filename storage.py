@@ -226,6 +226,18 @@ class Storage:
             )
             self.conn.commit()
 
+    def set_max_items_per_group(self, limit: int) -> None:
+        normalized = (
+            int(limit) if limit and int(limit) > 0 else DEFAULT_MAX_STORAGE_PER_GROUP
+        )
+        with self._lock:
+            self.max_items_per_group = normalized
+            cur = self.conn.cursor()
+            cur.execute("SELECT id FROM groups")
+            group_ids = [int(row["id"]) for row in cur.fetchall()]
+            for group_id in group_ids:
+                self._prune_group_items(group_id, self.max_items_per_group)
+
     def add_item(
         self,
         content_type: str,
@@ -261,24 +273,28 @@ class Storage:
             return new_id
 
     def list_items(
-        self, group_id: Optional[int], query: Optional[str], previews_only: bool = False
+        self,
+        group_id: Optional[int],
+        query: Optional[str],
+        previews_only: bool = False,
+        limit: Optional[int] = None,
     ) -> Iterable[sqlite3.Row]:
         cur = self.conn.cursor()
         if previews_only:
-            # Keep full draw.io payload so preview generation still works while collapsed.
             content_text_expr = (
-                "CASE WHEN content_type='drawio' THEN content_text "
+                "CASE WHEN content_type='drawio' THEN COALESCE(preview_text, '[DRAWIO]') "
                 "ELSE COALESCE(preview_text, content_text) END"
             )
             content_blob_expr = (
                 "CASE "
-                "WHEN content_type='html' THEN content_blob "  # keep html body for bg/color extraction
+                "WHEN content_type='drawio' THEN content_blob "
+                "WHEN content_type IN ('html', 'color') THEN COALESCE(preview_blob, content_blob) "
                 "WHEN preview_blob IS NULL THEN content_blob "
                 "ELSE NULL END"
             )
             has_full_expr = (
                 "CASE "
-                "WHEN content_type='html' THEN 1 "
+                "WHEN content_type IN ('html', 'color') THEN CASE WHEN preview_blob IS NULL THEN 1 ELSE 0 END "
                 "WHEN preview_blob IS NULL AND preview_text IS NULL THEN 1 "
                 "ELSE 0 END"
             )
@@ -336,6 +352,9 @@ class Storage:
             params = (f"%{query}%",)
         else:
             params = ()
+        if limit is not None and limit > 0:
+            base += " LIMIT ?"
+            params = params + (int(limit),)
         cur.execute(base, params)
         return cur.fetchall()
 
@@ -398,6 +417,42 @@ class Storage:
         row = cur.fetchone()
         return row
 
+    def list_items_missing_image_preview(
+        self, limit: Optional[int] = None
+    ) -> Iterable[sqlite3.Row]:
+        cur = self.conn.cursor()
+        query = """
+            SELECT id, content_type, content_text, content_blob
+            FROM items
+            WHERE content_type IN ('image', 'svg+xml')
+              AND content_blob IS NOT NULL
+              AND preview_blob IS NULL
+            ORDER BY id ASC
+        """
+        params: Tuple[object, ...] = ()
+        if limit is not None and limit > 0:
+            query += " LIMIT ?"
+            params = (int(limit),)
+        cur.execute(query, params)
+        return cur.fetchall()
+
+    def list_drawio_items_for_preview_backfill(
+        self, limit: Optional[int] = None
+    ) -> Iterable[sqlite3.Row]:
+        cur = self.conn.cursor()
+        query = """
+            SELECT id, content_text, content_blob, preview_blob
+            FROM items
+            WHERE content_type='drawio'
+            ORDER BY id ASC
+        """
+        params: Tuple[object, ...] = ()
+        if limit is not None and limit > 0:
+            query += " LIMIT ?"
+            params = (int(limit),)
+        cur.execute(query, params)
+        return cur.fetchall()
+
     def add_subitem(
         self,
         item_id: int,
@@ -453,6 +508,25 @@ class Storage:
         )
         return cur.fetchall()
 
+    def list_subitems_for_items(self, item_ids: list[int]) -> dict[int, list[sqlite3.Row]]:
+        if not item_ids:
+            return {}
+        cur = self.conn.cursor()
+        placeholders = ",".join("?" for _ in item_ids)
+        cur.execute(
+            f"""
+            SELECT id, item_id, text, icons, tag
+            FROM subitems
+            WHERE item_id IN ({placeholders})
+            ORDER BY item_id ASC, created_at ASC, id ASC
+            """,
+            tuple(int(item_id) for item_id in item_ids),
+        )
+        mapping: dict[int, list[sqlite3.Row]] = {}
+        for row in cur.fetchall():
+            mapping.setdefault(int(row["item_id"]), []).append(row)
+        return mapping
+
     def _prune_group_items(self, group_id: int, limit: int) -> None:
         if limit <= 0:
             return
@@ -479,7 +553,7 @@ class Storage:
         preview_text: Optional[str],
         preview_blob: Optional[bytes],
     ) -> None:
-        if "xxx" in preview_text:
+        if preview_text and "xxx" in preview_text:
             print("Updating preview for item", item_id)
         with self._lock:
             cur = self.conn.cursor()
@@ -490,6 +564,24 @@ class Storage:
                 WHERE id=?
                 """,
                 (preview_text, preview_blob, item_id),
+            )
+            self.conn.commit()
+
+    def update_content_and_preview_blobs(
+        self,
+        item_id: int,
+        content_blob: Optional[bytes],
+        preview_blob: Optional[bytes],
+    ) -> None:
+        with self._lock:
+            cur = self.conn.cursor()
+            cur.execute(
+                """
+                UPDATE items
+                SET content_blob=?, preview_blob=?
+                WHERE id=?
+                """,
+                (content_blob, preview_blob, item_id),
             )
             self.conn.commit()
 
