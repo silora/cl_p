@@ -49,6 +49,16 @@ ApplicationWindow {
                 window.toggleSearchBar()
                 return
             }
+            if (e.key === Qt.Key_Back) {
+                e.accepted = true
+                window.switchGroupTab(-1)
+                return
+            }
+            if (e.key === Qt.Key_Forward) {
+                e.accepted = true
+                window.switchGroupTab(1)
+                return
+            }
             if (e.key === Qt.Key_Escape) {
                 e.accepted = true
                 backend.hideWindow()
@@ -197,6 +207,55 @@ ApplicationWindow {
         })
     }
 
+    function switchGroupTab(step) {
+        var total = groupModel ? groupModel.rowCount() : 0
+        if (!total || total <= 0) return
+
+        var currentRow = -1
+        if (groupModel && groupModel.idAt) {
+            for (var i = 0; i < total; ++i) {
+                if (groupModel.idAt(i) === backend.currentGroupId) {
+                    currentRow = i
+                    break
+                }
+            }
+        }
+        if (currentRow < 0) return
+
+        var nextRow = currentRow + step
+        if (nextRow < 0 || nextRow >= total) return
+
+        var nextId = groupModel.idAt(nextRow)
+        if (nextId === undefined || nextId === null) return
+
+        window.settingsPageActive = false
+        backend.selectGroup(nextId)
+    }
+
+    function ensureCurrentGroupTabVisible() {
+        if (!groupList || !backend.remainingGroupModel || settingsPageActive) return
+
+        var model = backend.remainingGroupModel
+        var total = model.rowCount ? model.rowCount() : 0
+        if (!total || total <= 0 || !model.idAt) return
+
+        var row = -1
+        for (var i = 0; i < total; ++i) {
+            if (model.idAt(i) === backend.currentGroupId) {
+                row = i
+                break
+            }
+        }
+        if (row < 0) return
+
+        groupList.positionViewAtIndex(row, ListView.Contain)
+        Qt.callLater(function() {
+            if (backend.currentGroupId === model.idAt(row)) {
+                groupList.positionViewAtIndex(row, ListView.Contain)
+            }
+        })
+    }
+
     Shortcut {
         sequences: ["Ctrl+Enter"]
         enabled: window.selectedClipId > 0
@@ -221,6 +280,20 @@ ApplicationWindow {
             color: grays[0]
             clip: true
             antialiasing: true
+            border.width: 3
+            border.color: grays[3]
+
+            TapHandler {
+                acceptedButtons: Qt.BackButton | Qt.ForwardButton
+                gesturePolicy: TapHandler.ReleaseWithinBounds
+                onTapped: function(eventPoint, button) {
+                    if (button === Qt.BackButton) {
+                        window.switchGroupTab(-1)
+                    } else if (button === Qt.ForwardButton) {
+                        window.switchGroupTab(1)
+                    }
+                }
+            }
 
         // optional: dragging window by empty header area (你也可以只给 header 某块加)
         // MouseArea {
@@ -289,7 +362,8 @@ ApplicationWindow {
                                               ? highlightColors[0]
                                               : mixColor(highlightColors[0], grays[0]))
                                            : ((fixedTabRoot.checked || fixedTabRoot.hovered) ? grays[0] : grays[2])
-                                    border.width: fixedTabRoot.checked ? 3 : 0
+                                    // border.width: fixedTabRoot.checked ? 3 : 0
+                                    border.width: 0
                                     border.color: grays[3]
                                 }
 
@@ -443,24 +517,39 @@ ApplicationWindow {
                         radius: 1
                     }
 
-                    ListView {
-                        id: groupList
+                    Rectangle {
+                        id: groupListFrame
                         Layout.fillWidth: true
-                        Layout.fillHeight: true
-
-                        orientation: ListView.Horizontal
-                        spacing: 8
+                        Layout.alignment: Qt.AlignVCenter
+                        Layout.preferredHeight: Math.max(28, groupBar.height - 14)
+                        // color: addAlphaToColor(grays[0], 0.22)
+                        color: addAlphaToColor(grays[0], 0)
+                        // border.color: addAlphaToColor(grays[4], 0.8)
+                        border.width: 0
                         clip: true
-                        boundsBehavior: Flickable.StopAtBounds
 
-                        model: backend.remainingGroupModel
-                        flickDeceleration: 5000
-                        maximumFlickVelocity: 20000
-                        ScrollBar.horizontal: ScrollBar {
-                            policy: ScrollBar.AsNeeded
-                        }
+                        ListView {
+                            id: groupList
+                            anchors.fill: parent
+                            anchors.leftMargin: 2
+                            anchors.rightMargin: 2
 
-                        delegate: Item {
+                            orientation: ListView.Horizontal
+                            spacing: 8
+                            clip: true
+                            boundsBehavior: Flickable.StopAtBounds
+
+                            model: backend.remainingGroupModel
+                            flickDeceleration: 5000
+                            maximumFlickVelocity: 20000
+                            ScrollBar.horizontal: ScrollBar {
+                                policy: ScrollBar.AsNeeded
+                            }
+
+                            Component.onCompleted: Qt.callLater(function() { window.ensureCurrentGroupTabVisible() })
+                            onModelChanged: Qt.callLater(function() { window.ensureCurrentGroupTabVisible() })
+
+                            delegate: Item {
                             id: tabRoot
                             height: groupList.height
                             width: tabPill.implicitWidth
@@ -496,13 +585,14 @@ ApplicationWindow {
                                 Rectangle {
                                     id: tabPill
                                     anchors.verticalCenter: parent.verticalCenter
-                                    height: parent.height - 2
+                                    height: parent.height - 6
                                     radius: 8
 
                                     implicitWidth: Math.max(56, label.implicitWidth + 24)
 
                                     color: (tabRoot.isDestination ? ((tabRoot.checked || tabRoot.hovered) ? highlightColors[0] : mixColor(highlightColors[0], grays[0])) : ((tabRoot.checked || tabRoot.hovered) ? grays[0] : grays[2]))
-                                    border.width: tabRoot.checked ? 3 : 0
+                                    // border.width: tabRoot.checked ? 3 : 0
+                                    border.width: 0
                                     border.color: grays[3]
 
                                 RowLayout {
@@ -510,7 +600,7 @@ ApplicationWindow {
                                     anchors.fill: parent
                                     anchors.leftMargin: 12
                                     anchors.rightMargin: 8
-                                    spacing: 4
+                                    spacing: 8
 
                                     Label {
                                         id: label
@@ -661,6 +751,35 @@ ApplicationWindow {
                                 }
                             }
                         }
+                        }
+
+                        // Rectangle {
+                        //     anchors.left: parent.left
+                        //     anchors.top: parent.top
+                        //     anchors.bottom: parent.bottom
+                        //     width: 22
+                        //     visible: groupList.contentWidth > groupList.width + 1
+                        //     z: 2
+                        //     gradient: Gradient {
+                        //         orientation: Gradient.Horizontal
+                        //         GradientStop { position: 0.0; color: addAlphaToColor(grays[1], 0.92) }
+                        //         GradientStop { position: 1.0; color: addAlphaToColor(grays[1], 0.0) }
+                        //     }
+                        // }
+
+                        // Rectangle {
+                        //     anchors.right: parent.right
+                        //     anchors.top: parent.top
+                        //     anchors.bottom: parent.bottom
+                        //     width: 22
+                        //     visible: groupList.contentWidth > groupList.width + 1
+                        //     z: 2
+                        //     gradient: Gradient {
+                        //         orientation: Gradient.Horizontal
+                        //         GradientStop { position: 0.0; color: addAlphaToColor(grays[1], 0.0) }
+                        //         GradientStop { position: 1.0; color: addAlphaToColor(grays[1], 0.92) }
+                        //     }
+                        // }
                     }
 
                     Rectangle {
@@ -970,8 +1089,8 @@ ApplicationWindow {
                 radius: 12
                 color: grays[1]
                 gradient: Gradient {
-                    GradientStop { position: 0.0; color: window.settingsPageActive ? grays[1] : (backend.pluginsGroupId === backend.currentGroupId ? mixColor(highlightColors[0], grays[1]) : grays[1]) }
-                    GradientStop { position: 1.0; color: window.settingsPageActive ? grays[3] : (backend.pluginsGroupId === backend.currentGroupId ? mixColor(highlightColors[2], grays[3]) : grays[3]) }
+                    GradientStop { position: 0.0; color: window.settingsPageActive ? grays[0] : (backend.pluginsGroupId === backend.currentGroupId ? mixColor(highlightColors[0], grays[0]) : grays[0]) }
+                    GradientStop { position: 1.0; color: window.settingsPageActive ? grays[0] : (backend.pluginsGroupId === backend.currentGroupId ? mixColor(highlightColors[2], grays[0]) : grays[0]) }
                 }
                 border.color: "transparent"
                 Layout.fillWidth: true
@@ -981,6 +1100,8 @@ ApplicationWindow {
                     id: clipList
                     anchors.fill: parent
                     anchors.margins: 8
+                    anchors.leftMargin: 2
+                    anchors.rightMargin: 2
                     property bool active: !window.settingsPageActive && backend.currentGroupId !== backend.pluginsGroupId
                     opacity: active ? 1 : 0
                     enabled: active
@@ -1038,6 +1159,7 @@ ApplicationWindow {
                         function onCurrentGroupChanged() {
                             clipList.currentIndex = -1
                             window.selectedClipId = -1
+                            Qt.callLater(function() { window.ensureCurrentGroupTabVisible() })
                         }
                     }
 
@@ -1072,6 +1194,7 @@ ApplicationWindow {
                         property string clipPreviewText: model.previewText
                         property int clipContentLength: model.contentLength
                         property string clipBaseColor: model.baseColor
+                        property string clipTextColor: model.textColor
                         property string clipLabel: model.label
                         property string previewSource: model.preview
                         property string fullPreviewSource: model.fullPreview
@@ -1124,15 +1247,42 @@ ApplicationWindow {
                             return a ? "#" + a + inv.slice(1) : inv;
                         }
 
+                        function readableRichTextColor() {
+                            if (delegateRoot.clipContentType === "html") {
+                                if (delegateRoot.clipTextColor !== "")
+                                    return delegateRoot.clipTextColor
+                                if (delegateRoot.clipBaseColor === "")
+                                    return grays[7]
+                            } else if (delegateRoot.clipContentType !== "color") {
+                                return grays[7]
+                            }
+                            var hex = delegateRoot.clipBaseColor || ""
+                            var m = /^#([A-Fa-f0-9]{6})$/.exec(hex)
+                            if (!m) {
+                                m = /^#([A-Fa-f0-9]{8})$/.exec(hex)
+                                if (m) {
+                                    hex = "#" + hex.slice(hex.length - 6)
+                                    m = /^#([A-Fa-f0-9]{6})$/.exec(hex)
+                                }
+                            }
+                            if (!m) return grays[7]
+                            var h = m[1]
+                            var r = parseInt(h.slice(0, 2), 16)
+                            var g = parseInt(h.slice(2, 4), 16)
+                            var b = parseInt(h.slice(4, 6), 16)
+                            var luminance = 0.299 * r + 0.587 * g + 0.114 * b
+                            return luminance >= 160 ? grays[1] : grays[7]
+                        }
+
                         function cardGradientStops() {
-                            var base = delegateRoot.clipBaseColor ? delegateRoot.clipBaseColor : highlightColors[1]
+                            var base = delegateRoot.clipBaseColor ? delegateRoot.clipBaseColor : grays[1]
                             if (delegateRoot.isPinned && !delegateRoot.isCurrent) {
                                 return { s0: delegateRoot.isHovered ? highlightColors[0] : highlightColors[1],
                                          s35: delegateRoot.isHovered ? highlightColors[1] : highlightColors[2],
                                          s75: highlightColors[2], s1: highlightColors[2] }
                             }
                             if (delegateRoot.isPinned && delegateRoot.isCurrent) {
-                                return { s0: highlightColors[0], s35: highlightColors[0], s75: highlightColors[1], s1: highlightColors[2] }
+                                return { s0: highlightColors[0], s35: highlightColors[0], s75: mixColor(highlightColors[1], base), s1: highlightColors[2] }
                             }
                             if (delegateRoot.isCurrent) {
                                 return { s0: highlightColors[0], s35: addAlphaToColor(highlightColors[0], 0.5), s75: addAlphaToColor(base, 0.5), s1: addAlphaToColor(base, 0.5) }
@@ -1167,10 +1317,10 @@ ApplicationWindow {
                         onClipBaseColorChanged: requestGradientUpdate()
                         Component.onCompleted: applyGradientStops()
 
-                        // Behavior on gs0  { ColorAnimation { duration: 140 } }
-                        // Behavior on gs35 { ColorAnimation { duration: 140 } }
-                        // Behavior on gs75 { ColorAnimation { duration: 140 } }
-                        // Behavior on gs1  { ColorAnimation { duration: 140 } }
+                        Behavior on gs0  { ColorAnimation { duration: 140 } }
+                        Behavior on gs35 { ColorAnimation { duration: 140 } }
+                        Behavior on gs75 { ColorAnimation { duration: 140 } }
+                        Behavior on gs1  { ColorAnimation { duration: 140 } }
 
                         function subIcon(tag) {
                             var t = (tag || "").toLowerCase()
@@ -1284,9 +1434,9 @@ ApplicationWindow {
                             Rectangle {
                                 id: mainContent
                                 anchors.fill: card
-                                anchors.margins: delegateRoot.isPluginItem ? 0 : 6
+                                anchors.margins: delegateRoot.isPluginItem ? 0 : 4
                                 radius: 12
-                                color: delegateRoot.clipBaseColor !== "" ? delegateRoot.clipBaseColor : grays[6]
+                                color: delegateRoot.clipBaseColor !== "" ? delegateRoot.clipBaseColor : grays[1]
                                 implicitHeight: mainContentCol.implicitHeight
 
                                 ColumnLayout {
@@ -1299,7 +1449,7 @@ ApplicationWindow {
                                         id: contentPanel
                                         Layout.fillWidth: true
                                         radius: 12
-                                        color: delegateRoot.clipBaseColor !== "" ? delegateRoot.clipBaseColor : grays[6]
+                                        color: delegateRoot.clipBaseColor !== "" ? delegateRoot.clipBaseColor : grays[1]
                                         clip: true
 
                                         implicitHeight: {
@@ -1346,8 +1496,8 @@ ApplicationWindow {
 
                                                 hoverPanEnabled: (delegateRoot.isHovered || delegateRoot.longPressHoverPan) && !clipList.flicking && !clipList.moving
                                                 skipNormalize: true
-                                                color: delegateRoot.clipBaseColor !== "" ? delegateRoot.clipBaseColor : grays[6]
-                                                textColor: grays[2]
+                                                color: delegateRoot.clipBaseColor !== "" ? delegateRoot.clipBaseColor : grays[1]
+                                                textColor: delegateRoot.readableRichTextColor()
 
                                                 fullText: (delegateRoot.clipContentType === "html" || delegateRoot.clipContentType === "color") ? "" : delegateRoot.clipContentText
                                                 collapsedText: (delegateRoot.clipContentType === "html" || delegateRoot.clipContentType === "color") ? "" : backend.truncateText(delegateRoot.clipContentText, 800)

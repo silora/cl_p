@@ -1,4 +1,4 @@
-import base64
+﻿import base64
 import html as _html
 import mimetypes
 import os

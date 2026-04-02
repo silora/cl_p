@@ -184,7 +184,13 @@ class DictionaryPlugin(Plugin):
                 html, err = self._cache[w]
                 preview_blob = html.encode("utf-8", errors="replace") if html else None
                 items.append(
-                    self._clip_from_html(w, html, raw, err, preview_blob=preview_blob)
+                    self._clip_from_html(
+                        w,
+                        html,
+                        raw,
+                        err,
+                        preview_blob=preview_blob,
+                    )
                 )
             elif self._loading_word == w:
                 items.append(
@@ -382,7 +388,7 @@ class DictionaryPlugin(Plugin):
             clean_html = html
         self._cache[word] = (
             (
-                clean_html
+                self._style_message(clean_html)
                 or self._style_message(f"<p>No definition found for <b>{word}</b>.</p>")
             ),
             err or None,
@@ -400,7 +406,7 @@ class DictionaryPlugin(Plugin):
     def _style_message(self, html: str) -> str:
         """Wrap helper messages with configured font-family."""
         safe_font = str(self._font_family).replace('"', "'")
-        return f"<div style='font-family:{safe_font}; font-size:14pt'>{html}</div>"
+        return f"<body style='background-color: #dee2e6;'><div style='font-family:{safe_font}; font-size:14pt'>{html}</div></body>"
 
     def _on_lookup_failed(self, word: str, error: str) -> None:
         if self._loading_word != word:

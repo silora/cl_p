@@ -212,6 +212,12 @@ class GroupSliceModel(QAbstractListModel):
         self._groups = groups_list
         self.endResetModel()
 
+    @Slot(int, result=int)
+    def idAt(self, row: int) -> int:
+        if 0 <= row < len(self._groups):
+            return int(self._groups[row].id)
+        return -1
+
 
 class ClipListModel(QAbstractListModel):
     IdRole = Qt.UserRole + 1
@@ -223,6 +229,7 @@ class ClipListModel(QAbstractListModel):
     GroupRole = Qt.UserRole + 7
     PreviewRole = Qt.UserRole + 8
     FullPreviewRole = Qt.UserRole + 25
+    TextColorRole = Qt.UserRole + 26
     SubitemsRole = Qt.UserRole + 9
     TooltipRole = Qt.UserRole + 10
     ContentBlobRole = Qt.UserRole + 11
@@ -302,6 +309,8 @@ class ClipListModel(QAbstractListModel):
             return self._color_data(clip)[1]
         if role == self.BaseColorRole:
             return self._extract_global_bg_color(clip) or ""
+        if role == self.TextColorRole:
+            return self._extract_global_text_color(clip) or ""
         if role == self.PreviewTextRole:
             return clip.preview_text
         if role == self.HasFullRole:
@@ -338,6 +347,7 @@ class ClipListModel(QAbstractListModel):
             self.ColorHexRole: b"colorHex",
             self.ColorTextRole: b"colorText",
             self.BaseColorRole: b"baseColor",
+            self.TextColorRole: b"textColor",
             self.PreviewTextRole: b"previewText",
             self.HasFullRole: b"hasFullContent",
             self.ContentLengthRole: b"contentLength",
@@ -415,6 +425,7 @@ class ClipListModel(QAbstractListModel):
             self.PreviewTextRole,
             self.TooltipRole,
             self.BaseColorRole,
+            self.TextColorRole,
             self.ColorHexRole,
             self.ColorTextRole,
             self.HasFullRole,
@@ -519,36 +530,64 @@ class ClipListModel(QAbstractListModel):
                 return txt_color.upper()
 
         if clip.content_type == "html":
-            blob = clip.content_blob
+            blob = clip.content_blob or getattr(clip, "preview_blob", None)
             if not blob:
                 return None
             try:
                 html = blob.decode("utf-8", errors="replace")
             except Exception:
                 return None
-            body_match = re.search(
-                r"<body[^>]*style=[\"'][^\"']*background(?:-color)?\s*:\s*([^;\"'>]+)",
-                html,
-                re.IGNORECASE,
-            )
-            if body_match:
-                return body_match.group(1).strip()
-            body_bg = re.search(
-                r"<body[^>]*bgcolor=[\"']([^\"'>]+)", html, re.IGNORECASE
-            )
-            if body_bg:
-                return body_bg.group(1).strip()
-            fragment_match = re.search(
-                r"<!--StartFragment-->\s*<div[^>]*style=[\"'][^\"']*background(?:-color)?\s*:\s*([^;\"'>]+)",
-                html,
-                re.IGNORECASE | re.S,
-            )
-            if fragment_match:
-                return fragment_match.group(1).strip()
+
+            patterns = [
+                r"<body[^>]*style=[\"'][^\"']*background-color\s*:\s*([^;\"'>]+)",
+                r"<body[^>]*style=[\"'][^\"']*background\s*:\s*([^;\"'>]+)",
+                r"<body[^>]*bgcolor=[\"']([^\"'>]+)",
+                r"<!--StartFragment-->.*?<div[^>]*style=[\"'][^\"']*background-color\s*:\s*([^;\"'>]+)",
+                r"<!--StartFragment-->.*?<div[^>]*style=[\"'][^\"']*background\s*:\s*([^;\"'>]+)",
+                r"<(?:div|pre|code|table|section|article)[^>]*style=[\"'][^\"']*background-color\s*:\s*([^;\"'>]+)",
+                r"<(?:div|pre|code|table|section|article)[^>]*style=[\"'][^\"']*background\s*:\s*([^;\"'>]+)",
+                r"<[^>]*style=[\"'][^\"']*background-color\s*:\s*([^;\"'>]+)",
+                r"<[^>]*style=[\"'][^\"']*background\s*:\s*([^;\"'>]+)",
+            ]
+            for pattern in patterns:
+                match = re.search(pattern, html, re.IGNORECASE | re.S)
+                if match:
+                    raw_color = match.group(1).strip()
+                    normalized = parse_color_text(raw_color)
+                    if normalized:
+                        return normalized
             return None
         if clip.content_type == "color":
             hex_value, _ = ClipListModel._color_data(clip)
             return hex_value or None
+        return None
+
+    @staticmethod
+    def _extract_global_text_color(clip: ClipItem) -> Optional[str]:
+        if clip.content_type != "html":
+            return None
+        blob = clip.content_blob or getattr(clip, "preview_blob", None)
+        if not blob:
+            return None
+        try:
+            html = blob.decode("utf-8", errors="replace")
+        except Exception:
+            return None
+
+        patterns = [
+            r"<body[^>]*style=[\"'][^\"']*color\s*:\s*([^;\"'>]+)",
+            r"<!--StartFragment-->.*?<div[^>]*style=[\"'][^\"']*(?:^|[;\\s])color\s*:\s*([^;\"'>]+)",
+            r"<(?:div|pre|code|table|section|article|span|font|i|b|strong|em|ol|ul|li|p)[^>]*style=[\"'][^\"']*(?:^|[;\\s])color\s*:\s*([^;\"'>]+)",
+            r"<font[^>]*color=[\"']([^\"'>]+)",
+            r"<[^>]*style=[\"'][^\"']*(?:^|[;\\s])color\s*:\s*([^;\"'>]+)",
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, html, re.IGNORECASE | re.S)
+            if match:
+                raw_color = match.group(1).strip()
+                normalized = parse_color_text(raw_color)
+                if normalized:
+                    return normalized
         return None
 
 

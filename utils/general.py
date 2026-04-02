@@ -42,7 +42,7 @@ def parse_color_text(text: str) -> Optional[str]:
     if rgb_match:
         r, g, b = (int(x) for x in rgb_match.groups())
         if all(0 <= v <= 255 for v in (r, g, b)):
-            return f"rgb({r}, {g}, {b})"
+            return f"#{r:02X}{g:02X}{b:02X}"
     rgba_match = re.fullmatch(
         r"rgba\(\s*(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*([0-9]*\.?[0-9]+)\s*\)",
         value,
@@ -66,6 +66,5 @@ def parse_color_text(text: str) -> Optional[str]:
             and alpha_val is not None
             and 0 <= alpha_val <= 1
         ):
-            alpha_norm = f"{alpha_val:.3f}".rstrip("0").rstrip(".")
-            return f"rgba({r}, {g}, {b}, {alpha_norm})"
+            return f"#{r:02X}{g:02X}{b:02X}"
     return None
